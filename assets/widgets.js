@@ -355,13 +355,15 @@
         const effLr = lr / Math.max(0.05, 1 - mom);
         const ratio = effLr * B;
         const verdict = ratio < 1.2 ? '稳定收敛' : (ratio < 2 ? '来回震荡' : '发散！');
-        out.innerHTML =
-          '步数 <b>' + step + '</b>   位置 (' + cur[0].toFixed(3) + ', ' + cur[1].toFixed(3) + ')\n' +
-          '损失 L = <b>' + loss(cur).toExponential(3) + '</b>   |∇L| = ' + Math.hypot(...grad(cur)).toExponential(2) + '\n' +
-          '学习率 η = ' + lr.toFixed(3) + '   动量 β = ' + mom.toFixed(2) + '\n' +
-          '等效步长 η/(1−β) = ' + effLr.toFixed(3) + '\n' +
-          '稳定判据 η_eff × 曲率 8 = ' + ratio.toFixed(2) + '   →   <b>' + verdict + '</b>' +
-          (ratio >= 1.2 ? '  （超过 2 就会在陡峭方向炸开）' : '');
+        const lines = [
+          '步数 <b>' + step + '</b>   位置 (' + cur[0].toFixed(3) + ', ' + cur[1].toFixed(3) + ')',
+          '损失 L = <b>' + loss(cur).toExponential(3) + '</b>   |∇L| = ' + Math.hypot(...grad(cur)).toExponential(2),
+          '学习率 η = ' + lr.toFixed(3) + '   动量 β = ' + mom.toFixed(2),
+          '等效步长 η/(1−β) = ' + effLr.toFixed(3),
+          '稳定判据 η_eff×曲率 = ' + ratio.toFixed(2) + '  →  <b>' + verdict + '</b>',
+        ];
+        if (ratio >= 1.2) lines.push('比值超过 2，就会在陡峭方向炸开');
+        out.innerHTML = lines.join('\n');
       }
     }
 

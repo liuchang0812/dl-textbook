@@ -2,7 +2,8 @@
 
 **一本写给程序员的交互式教材：从一行线性回归，一路走到亲手实现 mini-GPT。**
 
-在线阅读：**<https://liuchang0812.github.io/dl-textbook/>**
+在线阅读：**<https://www.liuchang0812.com/dl-textbook/>**
+（`https://liuchang0812.github.io/dl-textbook/` 会 301 跳转到此地址）
 
 无需安装、无需联网、无需构建。双击 `index.html` 就能读——公式、图表、交互演示全部本地化。
 
