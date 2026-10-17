@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 14 章 · 推理与部署 — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="14">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 14 章 · 第五部 大模型工程</span>
+    <h1>推理与部署</h1>
+    <p class="chapter-head__lead">
+      训练是几千万美元的一次性投入，推理是每天都在烧的钱。
+      一个 70B 模型光权重就要 140 GB，生成 1000 个 token 要跑 1000 次前向传播。
+      这一章讲怎么让它跑得动、跑得快、跑得便宜：
+      KV Cache、量化、采样策略、连续批处理。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 30 分钟</span>
+      <span>🎯 掌握推理优化的核心手段</span>
+      <span>🧪 2 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>14.1 推理的两个阶段</h2>
+
+  <p>
+    LLM 的推理和训练有一个根本区别：<strong>它是逐 token 生成的。</strong>
+    要生成 500 个 token，就要跑 500 次前向传播。
+  </p>
+
+  <p>而这 500 次里，第一次和后面 499 次的<strong>性质完全不同</strong>：</p>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 210" role="img" aria-label="Prefill 与 Decode 两个阶段的对比">
+      <!-- Prefill -->
+      <text x="14" y="20" font-size="12" font-weight="700" fill="var(--brand)" font-family="sans-serif">① Prefill（预填充）</text>
+      <text x="14" y="38" font-size="10.5" fill="var(--ink-3)" font-family="sans-serif">一次性处理整个 prompt，并行计算</text>
+      <g>
+        <rect x="14" y="50" width="220" height="40" rx="8" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <g font-family="monospace" font-size="9.5" fill="var(--brand)" text-anchor="middle">
+          <text x="34" y="74">今天</text><text x="66" y="74">天气</text><text x="98" y="74">真</text>
+          <text x="130" y="74">好</text><text x="162" y="74">我</text><text x="194" y="74">想</text>
+        </g>
+      </g>
+      <text x="14" y="112" font-size="10.5" fill="var(--ok)" font-family="sans-serif">✓ 高度并行，GPU 利用率高（compute-bound）</text>
+      <text x="14" y="130" font-size="10.5" fill="var(--ink-3)" font-family="sans-serif">✓ 决定了「首 token 延迟」（TTFT）</text>
+      <text x="14" y="148" font-size="10.5" fill="var(--ink-3)" font-family="sans-serif">✓ 长度越长，这一步越慢（$O(n^2)$ 注意力）</text>
+
+      <!-- Decode -->
+      <text x="290" y="20" font-size="12" font-weight="700" fill="var(--violet)" font-family="sans-serif">② Decode（解码）</text>
+      <text x="290" y="38" font-size="10.5" fill="var(--ink-3)" font-family="sans-serif">每次只生成一个 token，串行</text>
+      <g>
+        <rect x="290" y="50" width="36" height="40" rx="8" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="308" y="74" font-size="10" fill="var(--violet)" text-anchor="middle" font-family="monospace">去</text>
+        <rect x="334" y="50" width="36" height="40" rx="8" fill="var(--violet-soft)" stroke="var(--violet)" opacity=".55"></rect>
+        <text x="352" y="74" font-size="10" fill="var(--violet)" text-anchor="middle" font-family="monospace">哪</text>
+        <rect x="378" y="50" width="36" height="40" rx="8" fill="var(--violet-soft)" stroke="var(--violet)" opacity=".3"></rect>
+        <text x="396" y="74" font-size="10" fill="var(--violet)" text-anchor="middle" font-family="monospace">？</text>
+        <text x="440" y="74" font-size="11" fill="var(--ink-4)" font-family="sans-serif">…</text>
+      </g>
+      <text x="290" y="112" font-size="10.5" fill="var(--danger)" font-family="sans-serif">⚠ 串行，每次只算一个 token</text>
+      <text x="290" y="130" font-size="10.5" fill="var(--danger)" font-family="sans-serif">⚠ 瓶颈是显存带宽，不是算力（memory-bound）</text>
+      <text x="290" y="148" font-size="10.5" fill="var(--ink-3)" font-family="sans-serif">⚠ 决定了「每 token 延迟」（TPOT）</text>
+
+      <!-- 底部说明 -->
+      <line x1="14" y1="172" x2="526" y2="172" stroke="var(--line)" stroke-dasharray="4 4"></line>
+      <text x="270" y="192" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">
+        关键洞察：Decode 阶段 GPU 的算力几乎全在闲置，瓶颈在「把 140GB 权重从显存读进计算单元」
+      </text>
+    </svg>
+    <div class="figure__caption">
+      <b>两个阶段的本质差异。</b>Prefill 是「算力密集」，
+      Decode 是「显存带宽密集」。这两种瓶颈需要完全不同的优化手段。
+    </div>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">为什么 Decode 是带宽瓶颈？</div>
+    <p>
+      生成一个 token，需要把<strong>全部模型权重</strong>读一遍。
+      一个 70B 的 bf16 模型是 140 GB，H100 的显存带宽约 3.35 TB/s，
+      所以读一遍至少要 $140/3350 \approx 42$ 毫秒。
+    </p>
+    <p>
+      而这一遍读取只做了约 $2 \times 70\text{B} = 1.4\times10^{11}$ FLOPs 的计算，
+      相当于 H100 峰值算力的 0.14%。<strong>99.9% 的算力在等待数据。</strong>
+    </p>
+    <p>
+      所以 Decode 阶段的理论速度上限是 <strong>约 24 token/秒</strong>，
+      与模型大小成反比。这也解释了为什么 7B 模型比 70B 快十倍——
+      不是因为它算得少，而是因为它读得少。
+    </p>
+    <p>
+      <em>推论：批量处理是 Decode 阶段最重要的优化。</em>
+      一次读权重，同时给 32 个用户算，吞吐量能提升几十倍。
+      这就是下面要讲的连续批处理。
+    </p>
+  </div>
+
+  <h2>14.2 KV Cache：一个必须理解的优化</h2>
+
+  <p>
+    先看没有 KV Cache 会怎样。生成第 100 个 token 时，输入是前 99 个 token。
+    模型要做自注意力，需要计算这 99 个位置的 Q、K、V。
+  </p>
+
+  <p>
+    但注意：<strong>前 98 个位置的 K 和 V，在生成第 99 个 token 时已经算过了，
+    它们完全没有变化。</strong>每次重新算一遍是纯粹的浪费。
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 230" role="img" aria-label="KV Cache 的原理">
+      <!-- 无 cache -->
+      <text x="14" y="20" font-size="11.5" font-weight="700" fill="var(--danger)" font-family="sans-serif">没有 KV Cache</text>
+      <g font-family="monospace" font-size="9.5" text-anchor="middle">
+        <rect x="14" y="32" width="40" height="26" rx="5" fill="var(--danger-soft)" stroke="var(--danger)" opacity=".7"></rect>
+        <text x="34" y="49" fill="var(--danger)">K₁V₁</text>
+        <rect x="58" y="32" width="40" height="26" rx="5" fill="var(--danger-soft)" stroke="var(--danger)" opacity=".7"></rect>
+        <text x="78" y="49" fill="var(--danger)">K₂V₂</text>
+        <rect x="102" y="32" width="40" height="26" rx="5" fill="var(--danger-soft)" stroke="var(--danger)" opacity=".7"></rect>
+        <text x="122" y="49" fill="var(--danger)">K₃V₃</text>
+        <text x="160" y="49" font-size="11" fill="var(--ink-4)">…</text>
+        <rect x="180" y="32" width="44" height="26" rx="5" fill="var(--brand-soft)" stroke="var(--brand)"></rect>
+        <text x="202" y="49" fill="var(--brand)">K₁₀₀V₁₀₀</text>
+      </g>
+      <text x="240" y="49" font-size="10.5" fill="var(--danger)" font-family="sans-serif">← 每一步都要重算全部</text>
+      <text x="14" y="78" font-size="10" fill="var(--ink-3)" font-family="sans-serif">
+        第 t 步的计算量 ∝ t，总计算量 ∝ n²
+      </text>
+
+      <!-- 有 cache -->
+      <text x="14" y="112" font-size="11.5" font-weight="700" fill="var(--ok)" font-family="sans-serif">有 KV Cache</text>
+      <g font-family="monospace" font-size="9.5" text-anchor="middle">
+        <rect x="14" y="124" width="210" height="26" rx="5" fill="var(--ok-soft)" stroke="var(--ok)" opacity=".8"></rect>
+        <text x="119" y="141" fill="var(--ok)">缓存的 K₁V₁ … K₉₉V₉₉（只读，不重算）</text>
+        <rect x="230" y="124" width="44" height="26" rx="5" fill="var(--brand-soft)" stroke="var(--brand)"></rect>
+        <text x="252" y="141" fill="var(--brand)">K₁₀₀V₁₀₀</text>
+      </g>
+      <text x="284" y="141" font-size="10.5" fill="var(--ok)" font-family="sans-serif">← 只算新的</text>
+      <text x="14" y="170" font-size="10" fill="var(--ink-3)" font-family="sans-serif">
+        第 t 步只算 1 个位置，总计算量 ∝ n（而不是 n²）
+      </text>
+
+      <!-- 结论 -->
+      <rect x="14" y="186" width="512" height="34" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="270" y="207" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">
+        代价：需要存储 K 和 V，显存占用随「上下文长度 × 并发数」线性增长
+      </text>
+    </svg>
+    <div class="figure__caption">
+      <b>KV Cache 的原理。</b>把已经算过的 Key 和 Value 缓存起来，
+      每步只计算新 token 的 KV，然后拼接。生成速度能提升几十倍。
+    </div>
+  </div>
+
+  <div class="codeblock" data-lang="python" data-title="带 KV Cache 的注意力">
+<script type="text/dlcode">
+def attention_with_cache(x, cache=None):
+    """
+    x: (B, 1, d_model)   —— 只有当前这个 token
+    cache: 之前所有时间步的 (K, V)
+    """
+    B, T, C = x.shape
+
+    q = (x @ W_q).reshape(B, T, n_heads, d_k).transpose(1, 2)   # (B, h, 1, d_k)
+    k = (x @ W_k).reshape(B, T, n_heads, d_k).transpose(1, 2)
+    v = (x @ W_v).reshape(B, T, n_heads, d_k).transpose(1, 2)
+
+    if cache is not None:
+        k_prev, v_prev = cache
+        k = torch.cat([k_prev, k], dim=2)      # 拼接历史
+        v = torch.cat([v_prev, v], dim=2)
+
+    new_cache = (k, v)
+
+    # 注意：q 只有 1 个位置，k/v 有 T_total 个位置
+    # 所以注意力分数形状是 (B, h, 1, T_total)
+    scores = (q @ k.transpose(-2, -1)) / math.sqrt(d_k)
+    weights = F.softmax(scores, dim=-1)
+    out = (weights @ v).transpose(1, 2).reshape(B, 1, C)
+
+    return out @ W_o, new_cache
+</script>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>KV Cache 的代价：显存</div>
+    <p>
+      天下没有免费的午餐。KV Cache 省了计算，但吃了显存。
+      而且它的增长速度非常快——正比于<strong>层数 × 上下文长度 × 并发数</strong>。
+    </p>
+    <p>
+      一个 70B 模型的 KV Cache 在 32K 上下文、单条对话下就能占到 5 GB；
+      如果同时服务 32 个用户，就是 160 GB——比模型权重还大。
+    </p>
+    <p>
+      这就是为什么长上下文服务很贵，也是 GQA、MQA、KV 量化等技术出现的原因。
+      下面这个计算器可以帮你估算：
+    </p>
+  </div>
+
+  <div class="widget" data-widget="vram">
+    <div class="widget__head"><span class="tag">交互 17</span>推理显存估算器</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">参数量 N（十亿）</span><span class="ctrl__val" data-v="N">7</span></div>
+            <input type="range" data-p="N" min="1" max="405" step="1" value="7">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">量化位宽</span><span class="ctrl__val" data-v="bits">16 bit</span></div>
+            <input type="range" data-p="bits" min="4" max="16" step="4" value="16">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">层数 L</span><span class="ctrl__val" data-v="L">32</span></div>
+            <input type="range" data-p="L" min="12" max="126" step="2" value="32">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">注意力头数</span><span class="ctrl__val" data-v="H">32</span></div>
+            <input type="range" data-p="H" min="12" max="128" step="4" value="32">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">模型维度 d_model</span><span class="ctrl__val" data-v="d">4,096</span></div>
+            <input type="range" data-p="d" min="2048" max="16384" step="512" value="4096">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">上下文长度</span><span class="ctrl__val" data-v="seq">4,096</span></div>
+            <input type="range" data-p="seq" min="512" max="131072" step="512" value="4096">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">并发数（batch）</span><span class="ctrl__val" data-v="batch">1</span></div>
+            <input type="range" data-p="batch" min="1" max="128" step="1" value="1">
+          </div>
+          <div class="btnrow">
+            <button class="btn" data-preset="p7">7B</button>
+            <button class="btn" data-preset="p13">13B</button>
+            <button class="btn" data-preset="p70">70B</button>
+            <button class="btn" data-preset="p405">405B</button>
+          </div>
+        </div>
+        <div>
+          <div class="bars" data-role="bars" style="margin-bottom:.9rem"></div>
+          <div class="readout" data-role="info"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        试试把并发数从 1 拖到 32：你会发现 KV Cache 的增长速度可能远超你的预期。
+        再试试把量化位宽从 16 拖到 4：模型权重缩小到 1/4，但 <strong>KV Cache 完全不变</strong>——
+        这就是为什么「KV 量化」是一个独立的技术方向。
+        <br><br>
+        （估算假设使用 GQA，KV 头数是注意力头数的一半。）
+      </p>
+    </div>
+  </div>
+
+  <h2>14.3 量化：把模型塞进小显卡</h2>
+
+  <p>
+    量化的核心思想是：<strong>用更少的位来表示每个权重</strong>。
+    神经网络对精度的要求远没有我们想象的那么高——
+    把 fp16 压到 int4，模型大小变成 1/4，而效果通常只掉几个百分点。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>精度</th><th>7B 模型大小</th><th>质量损失</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>fp32</td><td>28 GB</td><td>基准</td><td>训练用，推理太浪费</td></tr>
+        <tr><td>bf16 / fp16</td><td>14 GB</td><td>几乎无损</td><td>推理的默认选择</td></tr>
+        <tr><td>int8</td><td>7 GB</td><td>几乎无损</td><td>非常安全的选择</td></tr>
+        <tr><td><strong>int4</strong></td><td>3.5 GB</td><td>轻微下降</td><td>消费级显卡的最佳平衡点</td></tr>
+        <tr><td>3-bit / 2-bit</td><td>2.6 / 1.8 GB</td><td>明显下降</td><td>需要特殊方法（如 GPTQ + 校准）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>量化的基本原理</h3>
+
+  <p>最朴素的量化是<strong>线性量化</strong>：把浮点数映射到整数区间。</p>
+
+  <div class="formula">
+    $$q = \text{round}\!\left(\frac{w - w_{\min}}{w_{\max} - w_{\min}} \times (2^b - 1)\right)$$
+    $$\hat{w} = w_{\min} + q \times \frac{w_{\max} - w_{\min}}{2^b - 1}$$
+    <div class="formula__caption">$b$ 是位宽。量化时存储 $q$ 和缩放系数，推理时反量化回浮点</div>
+  </div>
+
+  <p>
+    关键问题是：<strong>应该按什么粒度确定 $w_{\max}$ 和 $w_{\min}$？</strong>
+    如果整个矩阵共用一个范围，那些数值很小的权重会被压成 0；
+    如果每个权重单独一个范围，那就要额外存储缩放系数，失去意义。
+  </p>
+
+  <p>常见的粒度选择：</p>
+
+  <ul>
+    <li><strong>逐张量</strong>：整个权重矩阵一组参数。最省，但精度损失大。</li>
+    <li><strong>逐通道</strong>：每个输出通道一组。常用方案。</li>
+    <li><strong>分组（group-wise）</strong>：每 64 或 128 个权重一组。GPTQ/AWQ 的做法，
+    精度损失最小，是现在的主流。</li>
+  </ul>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>几种主流量化方案的取舍</div>
+    <p>
+      <strong>GPTQ：</strong>训练后量化（PTQ）。用一批校准数据，
+      逐个权重地量化，每量化一个就调整剩下的权重来补偿误差。
+      4-bit 下质量很好，是目前最常用的方案之一。
+    </p>
+    <p>
+      <strong>AWQ：</strong>观察到「只有 1% 的权重是重要的」，
+      于是按重要性加权，保护那些关键通道。质量通常略优于 GPTQ，速度也更快。
+    </p>
+    <p>
+      <strong>GGUF（llama.cpp）：</strong>支持 CPU 推理，在 Mac 上表现极好。
+      适合本地部署和个人使用。
+    </p>
+    <p>
+      <strong>QLoRA：</strong>把量化用在<em>训练</em>上——把基座模型量化成 4-bit 冻结，
+      只训练 LoRA 适配器。这让你能在一张 24GB 显卡上微调 33B 模型。第 15 章会讲。
+    </p>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>量化的一个容易忽略的坑</div>
+    <p>
+      量化的主要代价不是「效果变差」，而是<strong>对异常值极其敏感</strong>。
+      某些权重通道的数值可能比平均值大 100 倍（叫「异常通道」），
+      它们会把量化的动态范围撑开，导致其他权重全被压成同一个值。
+    </p>
+    <p>
+      这就是为什么「per-tensor」量化的效果远不如「group-wise」。
+      也是为什么现代大模型在架构上要加 QK-Norm——
+      从源头上抑制激活值的异常。
+    </p>
+  </div>
+
+  <h2>14.4 采样策略：怎么让输出不无聊也不胡说</h2>
+
+  <p>
+    模型输出的是词表上的概率分布。怎么从这个分布里挑一个 token，是一个独立的工程问题。
+  </p>
+
+  <p>
+    最朴素的做法是<strong>贪心搜索</strong>（每次选概率最高的），但它有两个问题：
+    输出会非常单调、容易陷入重复循环（「我觉得我觉得我觉得……」）。
+  </p>
+
+  <p>所以实践中都用随机采样，但要对分布做调整。亲手试一下：</p>
+
+  <div class="widget" data-widget="sampling">
+    <div class="widget__head"><span class="tag">交互 18</span>采样策略：温度、Top-k、Top-p</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">温度 T</span><span class="ctrl__val" data-v="temp">1.00</span></div>
+            <input type="range" data-p="temp" min="0.1" max="2" step="0.05" value="1">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">Top-k</span><span class="ctrl__val" data-v="k">8</span></div>
+            <input type="range" data-p="k" min="1" max="8" step="1" value="8">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">Top-p（核采样）</span><span class="ctrl__val" data-v="p">1.00</span></div>
+            <input type="range" data-p="p" min="0.1" max="1" step="0.05" value="1">
+          </div>
+          <div class="btnrow">
+            <button class="btn btn--primary" data-role="pick">按这个分布采样一次</button>
+          </div>
+          <div class="readout" data-role="info" style="margin-top:.8rem"></div>
+        </div>
+        <div>
+          <p style="font-size:.8rem;color:var(--ink-3);margin:0 0 .6rem">调整后的采样分布（灰掉的候选已被截断）</p>
+          <div class="bars" data-role="bars"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        <strong>试试这几种组合：</strong><br>
+        · T=0.2, k=8, p=1.0 → 分布极尖，几乎每次都选「的」。适合代码补全。<br>
+        · T=1.0, k=8, p=1.0 → 分布正常，有变化但不离谱。适合日常对话。<br>
+        · T=2.0, k=8, p=1.0 → 分布被抹平，低概率词也有机会。适合头脑风暴，但容易胡说。<br>
+        · T=1.0, k=8, p=0.5 → 只保留累计概率 50% 的候选。动态调整候选数量。
+      </p>
+    </div>
+  </div>
+
+  <h3>三个参数的分工</h3>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>参数</th><th>作用</th><th>推荐值</th><th>什么时候调</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>temperature</strong></td>
+          <td>整体缩放分布的「尖锐程度」</td>
+          <td>0.7（对话）<br>0.2（代码/数学）<br>1.2（创意）</td>
+          <td>输出太单调 → 调高<br>输出太发散 → 调低</td>
+        </tr>
+        <tr>
+          <td><strong>top-k</strong></td>
+          <td>硬性保留概率最高的 k 个候选</td>
+          <td>20~50（也可设为 0 关闭）</td>
+          <td>偶尔出现荒谬输出 → 调小</td>
+        </tr>
+        <tr>
+          <td><strong>top-p</strong></td>
+          <td>保留累计概率达到 p 的最小候选集</td>
+          <td>0.9~0.95</td>
+          <td>比 top-k 更自适应，通常单独用</td>
+        </tr>
+        <tr>
+          <td><strong>repetition penalty</strong></td>
+          <td>降低已出现 token 的概率</td>
+          <td>1.05~1.2</td>
+          <td>出现重复循环 → 调高<br>但太高会导致语法错乱</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>top-k 和 top-p 的区别</div>
+    <p>
+      <strong>top-k 是固定的候选数量。</strong>不管分布长什么样，都保留 50 个。
+      问题是：如果分布很尖（模型很确定），50 个里大部分是垃圾；
+      如果分布很平（模型很犹豫），50 个可能还不够。
+    </p>
+    <p>
+      <strong>top-p 是固定的概率质量。</strong>保留累计概率到 0.9 的那些候选。
+      模型确定时可能只保留 2 个，犹豫时保留 200 个。
+      <em>这是自适应的，所以通常效果更好。</em>
+    </p>
+    <p>
+      实践中常见的组合是「temperature + top-p」，或者「temperature + top-k」，
+      很少三个一起用——调参空间太大反而难调。
+    </p>
+  </div>
+
+  <h2>14.5 批处理：吞吐量的关键</h2>
+
+  <p>
+    回到第 14.1 节那个洞察：Decode 阶段的瓶颈是显存带宽，
+    而且<strong>读一次权重只生成一个 token 太浪费了</strong>。
+  </p>
+
+  <p>
+    如果同时给 32 个用户生成呢？权重还是读一次，但算了 32 个 token。
+    吞吐量提升 32 倍，而总延迟几乎不变。
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 220" role="img" aria-label="静态批处理与连续批处理的对比">
+      <!-- 静态批处理 -->
+      <text x="14" y="20" font-size="11.5" font-weight="700" fill="var(--danger)" font-family="sans-serif">静态批处理（Static Batching）</text>
+      <g font-family="sans-serif" font-size="9.5">
+        <rect x="14" y="30" width="120" height="20" rx="4" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="74" y="44" fill="var(--brand)" text-anchor="middle">请求 A（短）</text>
+        <rect x="138" y="30" width="240" height="20" rx="4" fill="var(--danger-soft)" stroke="var(--danger)" opacity=".45"></rect>
+        <text x="258" y="44" fill="var(--danger)" text-anchor="middle">空转等待</text>
+
+        <rect x="14" y="56" width="360" height="20" rx="4" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="194" y="70" fill="var(--brand)" text-anchor="middle">请求 B（长）</text>
+
+        <rect x="14" y="82" width="200" height="20" rx="4" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="114" y="96" fill="var(--brand)" text-anchor="middle">请求 C</text>
+        <rect x="218" y="82" width="160" height="20" rx="4" fill="var(--danger-soft)" stroke="var(--danger)" opacity=".45"></rect>
+        <text x="298" y="96" fill="var(--danger)" text-anchor="middle">空转</text>
+      </g>
+      <text x="386" y="70" font-size="10" fill="var(--danger)" font-family="sans-serif">← 必须等最长的完成</text>
+      <text x="14" y="120" font-size="10" fill="var(--ink-3)" font-family="sans-serif">GPU 利用率低：短请求完成后，它的槽位只能空着</text>
+
+      <!-- 连续批处理 -->
+      <text x="14" y="152" font-size="11.5" font-weight="700" fill="var(--ok)" font-family="sans-serif">连续批处理（Continuous Batching）</text>
+      <g font-family="sans-serif" font-size="9.5">
+        <rect x="14" y="162" width="120" height="18" rx="4" fill="var(--ok-soft)" stroke="var(--ok)"></rect>
+        <text x="74" y="175" fill="var(--ok)" text-anchor="middle">A（短）</text>
+        <rect x="138" y="162" width="120" height="18" rx="4" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="198" y="175" fill="var(--brand)" text-anchor="middle">D（新来的）</text>
+        <rect x="262" y="162" width="112" height="18" rx="4" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="318" y="175" fill="var(--brand)" text-anchor="middle">E（新来的）</text>
+
+        <rect x="14" y="186" width="360" height="18" rx="4" fill="var(--ok-soft)" stroke="var(--ok)"></rect>
+        <text x="194" y="199" fill="var(--ok)" text-anchor="middle">B（长）持续生成，槽位被新请求补上</text>
+      </g>
+      <text x="386" y="175" font-size="10" fill="var(--ok)" font-family="sans-serif">← 槽位永不满</text>
+      <text x="14" y="216" font-size="10" fill="var(--ink-3)" font-family="sans-serif">每生成一个 token 就检查一次：有请求完成就立刻换新的进来</text>
+    </svg>
+    <div class="figure__caption">
+      <b>连续批处理。</b>不再等整批一起结束，而是每步都动态调整批次成员。
+      这一项优化通常能把吞吐量提升 <b>5~20 倍</b>，是 vLLM 等框架最核心的能力。
+    </div>
+  </div>
+
+  <h3>PagedAttention：把操作系统思想搬进显存</h3>
+
+  <p>
+    连续批处理带来了一个新问题：KV Cache 的内存怎么管理？
+    如果为每个请求预分配最大长度的空间，会浪费 60%~80% 的显存
+    （因为大部分请求用不到那么长）。
+  </p>
+
+  <p>
+    vLLM 的 <strong>PagedAttention</strong> 借鉴了操作系统的虚拟内存分页：
+    把 KV Cache 切成固定大小的「页」（比如 16 个 token 一页），
+    按需分配，用一张表记录逻辑位置到物理页的映射。
+  </p>
+
+  <p>
+    效果：显存浪费从 60%~80% 降到 4% 以下，同样的硬件能同时服务 2~4 倍的请求。
+    这是一个纯粹的工程创新，没有任何算法上的改动，却带来了数倍的提升。
+  </p>
+
+  <h2>14.6 部署选型</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>场景</th><th>推荐方案</th><th>理由</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>个人本地试用</strong></td>
+          <td>Ollama / llama.cpp + GGUF 量化</td>
+          <td>一行命令跑起来，支持 CPU 和 Mac 统一内存，4-bit 的 7B 只要 4GB</td>
+        </tr>
+        <tr>
+          <td><strong>单机多并发服务</strong></td>
+          <td>vLLM / SGLang</td>
+          <td>连续批处理 + PagedAttention，吞吐量比朴素实现高一个数量级</td>
+        </tr>
+        <tr>
+          <td><strong>生产环境大规模</strong></td>
+          <td>vLLM + TensorRT-LLM + 多机部署</td>
+          <td>极致性能，支持张量并行、投机解码、前缀缓存</td>
+        </tr>
+        <tr>
+          <td><strong>边缘设备</strong></td>
+          <td>llama.cpp / MLC-LLM</td>
+          <td>支持手机、树莓派，CPU/GPU 混合推理</td>
+        </tr>
+        <tr>
+          <td><strong>不想运维</strong></td>
+          <td>云 API</td>
+          <td>按 token 付费，没有硬件和运维成本，但有数据隐私和成本上限问题</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>两个必须分开看的指标</h3>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">TTFT（首 token 延迟）</div>
+      <p class="card__body">
+        从发出请求到收到第一个 token 的时间。由 <strong>Prefill 阶段</strong>决定。
+        对交互式应用最重要——用户能忍受慢，但不能忍受「没反应」。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">TPOT（每 token 延迟）</div>
+      <p class="card__body">
+        生成每个后续 token 的平均时间。由 <strong>Decode 阶段</strong>决定。
+        决定了「读起来流不流畅」。通常要求小于 50ms，否则会感觉卡顿。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">吞吐量（tokens/s）</div>
+      <p class="card__body">
+        整个系统每秒能生成多少 token。由批处理效率决定。
+        这是成本指标——吞吐越高，每个 token 越便宜。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">三者的矛盾</div>
+      <p class="card__body">
+        增大批量能提高吞吐，但会拉高每个请求的延迟。
+        <strong>优化目标取决于业务</strong>：聊天机器人要低延迟，离线批处理要高峰值吞吐。
+      </p>
+    </div>
+  </div>
+
+  <h2>14.7 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">Prefill / Decode</div>
+      <div class="gloss__def">推理的两个阶段。前者算力密集（并行），后者带宽密集（串行）。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">KV Cache</div>
+      <div class="gloss__def">缓存已算过的 Key/Value，避免重复计算。把生成复杂度从 $O(n^2)$ 降到 $O(n)$。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">量化 <small>quantization</small></div>
+      <div class="gloss__def">用低位宽表示权重。int4 能把模型缩小 4 倍，效果损失很小。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">温度 <small>temperature</small></div>
+      <div class="gloss__def">缩放 logits 控制分布的尖锐程度。低=保守，高=随机。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">Top-p / 核采样</div>
+      <div class="gloss__def">保留累计概率达到 p 的最小候选集。比 top-k 更自适应。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">连续批处理</div>
+      <div class="gloss__def">动态调整批次成员，槽位永不满。vLLM 的核心能力，吞吐提升 5~20 倍。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>推理分 Prefill（算力密集）和 Decode（带宽密集）两个阶段，优化手段完全不同。</li>
+    <li>KV Cache 是必须的：它把生成的复杂度从 $O(n^2)$ 降到 $O(n)$，代价是显存。</li>
+    <li>量化用 4 位表示权重，模型缩小 4 倍，效果损失通常可接受。粒度（group-wise）比位宽更重要。</li>
+    <li>采样策略决定「多样性 vs 准确性」的平衡。temperature + top-p 是最常用的组合。</li>
+    <li>连续批处理是吞吐量的关键，能提升 5~20 倍，因为 Decode 阶段读一次权重可以算多个请求。</li>
+    <li>TTFT、TPOT、吞吐量是三个互相矛盾的指标，优化目标取决于业务场景。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么 Decode 阶段是显存带宽瓶颈，而不是算力瓶颈？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为生成一个 token 时，计算量极小但需要读取的数据极大。
+        </p>
+        <p>
+          具体来说：生成 1 个 token，要把<strong>全部模型权重</strong>从显存读一遍。
+          70B 的 bf16 模型是 140 GB，H100 的显存带宽是 3.35 TB/s，
+          所以读一遍要 42 毫秒。
+        </p>
+        <p>
+          而这一遍读取对应的计算量只有约 $2\times70\text{B} = 1.4\times10^{11}$ FLOPs，
+          而 H100 的 bf16 峰值是 $989\times10^{12}$ FLOPS，
+          理论上 0.14 毫秒就能算完。<strong>实际耗时是理论值的 300 倍</strong>，
+          全部消耗在等待数据搬运上。
+        </p>
+        <p>
+          这个分析直接推出两个结论：① 模型越大，生成越慢，且成正比；
+          ② 批处理能极大提升吞吐，因为读一次权重可以同时算多个请求。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>KV Cache 省了计算，但代价是什么？怎么缓解？</summary>
+      <div class="quiz__answer">
+        <p>
+          代价是<strong>显存</strong>，而且增长很快：
+          KV Cache 大小 = 2 × 层数 × KV 头数 × 头维度 × 序列长度 × 并发数 × 字节数。
+        </p>
+        <p>
+          缓解手段有四个方向：
+        </p>
+        <p>
+          <strong>① GQA / MQA：</strong>让多个 Query 头共享一组 KV 头，
+          直接把 KV Cache 缩小 4~8 倍。现代大模型的标配。
+        </p>
+        <p>
+          <strong>② KV 量化：</strong>把 KV Cache 也量化成 int8/int4，再省一半到四分之三。
+        </p>
+        <p>
+          <strong>③ PagedAttention：</strong>用分页机制按需分配，把浪费从 60~80% 降到 4%。
+        </p>
+        <p>
+          <strong>④ 减少并发或上下文长度：</strong>最直接但会影响服务能力。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>temperature 和 top-p 有什么区别？该调哪个？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>temperature</strong> 改变的是<strong>整个分布的形状</strong>——
+          它把所有 logits 除以 T，让分布整体变尖或变平。所有候选词都会受影响。
+        </p>
+        <p>
+          <strong>top-p</strong> 改变的是<strong>候选集的大小</strong>——
+          它按概率从高到低累加，到 p 为止，把剩下的直接砍掉。
+          分布形状不变，只是尾巴被切了。
+        </p>
+        <p>
+          <strong>该调哪个：</strong>temperature 是主力，它直接控制「创造性」；
+          top-p 是安全网，用来砍掉长尾里的荒谬选项。
+        </p>
+        <p>
+          推荐做法：先固定 top-p = 0.9，然后只调 temperature。
+          代码和数学任务用 0.1~0.3，日常对话 0.7，创意写作 1.0~1.2。
+          如果输出出现重复循环，加一点 repetition penalty（1.05~1.15）。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么连续批处理能提升 5~20 倍吞吐量？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为静态批处理有一个巨大的浪费：<strong>整批必须等最长的那个请求完成。</strong>
+        </p>
+        <p>
+          假设一批里有 3 个请求，分别需要生成 10、100、50 个 token。
+          静态批处理下，前 10 步三个都在跑，但从第 11 步开始，
+          请求 A 已经完成了，它的槽位只能空着，一直到第 100 步请求 B 结束。
+          平均 GPU 利用率可能只有 50% 左右。
+        </p>
+        <p>
+          连续批处理的做法是：<strong>每生成一个 token 就检查一次</strong>，
+          有请求完成就立刻把等待队列里的新请求放进来。
+          这样槽位几乎永远是满的。
+        </p>
+        <p>
+          结合 Decode 阶段「读一次权重能算多个请求」的特性，
+          填满槽位就等于把显存带宽利用到极致。实测吞吐提升通常在 5~20 倍之间。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么 int4 量化后效果只掉一点点，而 int2 就崩了？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为神经网络权重分布有一个特点：<strong>大部分权重都很小，只有少数很重要。</strong>
+        </p>
+        <p>
+          int4 有 16 个量化级别，配合 group-wise 缩放，
+          足以区分「很重要」「一般」「接近 0」这几个档次。信息损失可以接受。
+        </p>
+        <p>
+          int2 只有 4 个级别，意味着权重只能被归到 4 个值上。
+          这时候「0.01」和「0.03」会被压成同一个值，
+          而它们在网络里可能承担完全不同的功能。信息损失是灾难性的。
+        </p>
+        <p>
+          另外，int2 需要非常精细的校准和混合精度策略（比如保留一部分层为 int8），
+          才能勉强可用。这也是为什么「2-bit 量化」虽然有论文，
+          但在实际部署中很少见到。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    到目前为止，我们一直在讨论「别人的模型」——怎么理解它、怎么训练它、怎么部署它。
+  </p>
+
+  <p>
+    但很多时候你需要的是一个<strong>自己的</strong>模型：
+    懂你的业务术语、会用你的数据格式、符合你的语气风格。
+  </p>
+
+  <p>
+    下一章讲微调。你会看到，<strong>用一张消费级显卡（24GB），
+    就能微调一个 33B 的模型</strong>——靠的是一个叫 LoRA 的巧妙技巧，
+    它只训练原模型 0.1% 的参数。这是开源生态能够繁荣的关键技术。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

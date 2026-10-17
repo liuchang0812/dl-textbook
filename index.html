@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>深度学习之路 · 写给程序员的神经网络、深度学习与大模型</title>
+<meta name="description" content="一本为普通程序员写的深度学习与大模型教材：从一行线性回归到大模型的预训练、对齐、推理与应用，配 12 个可动手的交互演示。">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-home>
+
+<div id="progress"></div>
+
+<div class="cover">
+
+  <span class="cover__badge">Interactive Textbook · 交互式教材</span>
+
+  <h1>深度学习之路</h1>
+
+  <p class="cover__sub">
+    写给普通程序员的神经网络、深度学习与大模型。
+    你不需要微积分满分，也不需要显卡——你需要的只是一点点好奇心和动手的耐心。
+    这本书从「一行线性回归」一直讲到「大模型是怎么被造出来的」，每一步都有能拖动的交互演示。
+  </p>
+
+  <div class="cover__cta">
+    <a class="cta-primary" href="chapters/01-from-rules-to-learning.html">开始阅读 · 第 1 章 →</a>
+    <a class="cta-ghost" href="#route">先看学习路线</a>
+    <a class="cta-ghost" href="#toc">全部章节</a>
+  </div>
+
+  <div class="stats">
+    <div><div class="stat__num">21</div><div class="stat__label">章 · 七个部分</div></div>
+    <div><div class="stat__num">23</div><div class="stat__label">个可交互演示</div></div>
+    <div><div class="stat__num">70+</div><div class="stat__label">段可运行代码</div></div>
+    <div><div class="stat__num">0</div><div class="stat__label">个需要背的公式</div></div>
+  </div>
+
+  <h2><span class="dot"></span>这本书想解决什么问题</h2>
+
+  <p>
+    市面上讲深度学习的材料，大多卡在两个极端：要么是论文和教科书，一上来就是
+    $\nabla_\theta \mathcal{L}$ 和雅可比矩阵，程序员读三页就放弃了；要么是「调包教程」，
+    教你把 <code>model.fit()</code> 敲一遍，跑通了却什么也没懂，遇到问题完全不知道从哪下手。
+  </p>
+
+  <p>
+    这本书走第三条路：<strong>先把直觉建立起来，再补数学，最后落到代码</strong>。
+    每一个概念都会回答三个问题——它<em>想解决什么问题</em>、它<em>长什么样</em>、它<em>怎么写成代码</em>。
+    数学只在真正需要的地方出现，而且一定配着一句人话解释。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">全书唯一的中心思想</div>
+    <p>
+      深度学习的全部魔法，可以压缩成一句话：
+      <strong>把「写规则」换成「定义目标 + 自动调参」。</strong>
+    </p>
+    <p>
+      你不再告诉程序「猫有尖耳朵和胡须」，而是告诉它「这张图是猫，那张是狗」，
+      再给它一个可以衡量「错得多离谱」的数字，剩下的交给梯度下降。
+      从 1958 年的感知机到 2026 年的大模型，变的只是「目标函数怎么定义」和「参数怎么调得更高效」。
+    </p>
+  </div>
+
+  <h2 id="route"><span class="dot"></span>学习路线</h2>
+
+  <p>
+    七个部分是有顺序的，前面的每一部分都是后面的地基。但你不必一次读完——
+    如果只想尽快用上大模型，可以直接从第五部分开始，遇到不懂的再回头补。
+  </p>
+
+  <div class="route">
+
+    <div class="route__step">
+      <div class="route__num">I</div>
+      <div>
+        <div class="route__title">直觉篇 · 什么是「学习」</div>
+        <p class="route__desc">
+          从「程序员写规则」切换到「模型学规则」。你会亲手搭出第一个神经元，
+          看懂为什么单个神经元连 XOR 都学不会，而堆两层就能学会。
+        </p>
+        <div class="route__links">
+          <a href="chapters/01-from-rules-to-learning.html">01 从规则到学习</a>
+          <a href="chapters/02-neuron-and-activation.html">02 神经元与激活函数</a>
+          <a href="chapters/03-forward-propagation.html">03 多层网络与前向传播</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="route__step">
+      <div class="route__num">II</div>
+      <div>
+        <div class="route__title">引擎篇 · 参数是怎么变好的</div>
+        <p class="route__desc">
+          这是全书最核心的部分。梯度下降是「怎么走」，反向传播是「往哪走」。
+          看完这两章，你就理解了所有深度学习框架在背后做的事。再学会训练的艺术，就能自己 debug 一个不收敛的模型。
+        </p>
+        <div class="route__links">
+          <a href="chapters/04-gradient-descent.html">04 梯度下降与优化器</a>
+          <a href="chapters/05-backpropagation.html">05 反向传播</a>
+          <a href="chapters/06-training-craft.html">06 训练的艺术</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="route__step">
+      <div class="route__num">III</div>
+      <div>
+        <div class="route__title">结构篇 · 为数据设计形状</div>
+        <p class="route__desc">
+          图像有空间结构，语言有时间结构。CNN 和 RNN 是把「先验知识」写进网络结构的两种经典方式，
+          理解它们，才能理解 Transformer 为什么要推翻它们。
+        </p>
+        <div class="route__links">
+          <a href="chapters/07-cnn.html">07 卷积神经网络</a>
+          <a href="chapters/08-sequence-models.html">08 序列模型与记忆</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="route__step">
+      <div class="route__num">IV</div>
+      <div>
+        <div class="route__title">注意力革命 · 一切的转折点</div>
+        <p class="route__desc">
+          2017 年那篇《Attention Is All You Need》之后，整个领域被重写了一遍。
+          这三章会拆开 Transformer 的每一个零件，最后告诉你 GPT 其实只做了一件事：预测下一个词。
+        </p>
+        <div class="route__links">
+          <a href="chapters/09-attention.html">09 注意力机制</a>
+          <a href="chapters/10-transformer.html">10 Transformer 解剖</a>
+          <a href="chapters/11-language-models.html">11 语言模型与 GPT</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="route__step">
+      <div class="route__num">V</div>
+      <div>
+        <div class="route__title">大模型工程 · 怎么造出来的</div>
+        <p class="route__desc">
+          从几万张 GPU 的预训练集群，到让模型「愿意帮忙」的对齐，到推理时的 KV Cache 与量化，
+          再到用一张消费级显卡微调出你自己的模型。
+        </p>
+        <div class="route__links">
+          <a href="chapters/12-pretraining.html">12 大模型预训练</a>
+          <a href="chapters/13-alignment.html">13 对齐 SFT/RLHF/DPO</a>
+          <a href="chapters/14-inference.html">14 推理与部署</a>
+          <a href="chapters/15-fine-tuning.html">15 微调与 LoRA</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="route__step">
+      <div class="route__num">VI</div>
+      <div>
+        <div class="route__title">应用篇 · 怎么把它用起来</div>
+        <p class="route__desc">
+          提示工程不是玄学，RAG 不是「接个向量库」，Agent 也不是「让模型自己循环」。
+          这四章讲的是工程，也是判断力。
+        </p>
+        <div class="route__links">
+          <a href="chapters/16-prompting.html">16 提示工程</a>
+          <a href="chapters/17-rag.html">17 检索增强生成</a>
+          <a href="chapters/18-agents.html">18 智能体与工具调用</a>
+          <a href="chapters/19-evaluation.html">19 评测、幻觉与安全</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="route__step">
+      <div class="route__num">VII</div>
+      <div>
+        <div class="route__title">实践与前沿 · 自己造一个</div>
+        <p class="route__desc">
+          最后用三百行 PyTorch 从零训练一个能写诗的 mini-GPT——不带任何黑盒。
+          然后抬头看看正在发生的事：MoE、多模态、长上下文、推理模型。
+        </p>
+        <div class="route__links">
+          <a href="chapters/20-mini-gpt.html">20 从零实现 mini-GPT</a>
+          <a href="chapters/21-frontier.html">21 前沿与展望</a>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <h2><span class="dot"></span>你需要什么基础</h2>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">必需 · 会写代码</div>
+      <p class="card__body">任意一门语言的编程经验，能看懂函数、循环、数组就够了。书中代码用 Python + NumPy + PyTorch。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">必需 · 高中数学</div>
+      <p class="card__body">知道函数、向量、求和符号 $\sum$ 是什么意思。导数只需要「变化率」这个直觉，第 4 章会从零讲起。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">不需要 · 显卡</div>
+      <p class="card__body">所有交互演示都在浏览器里跑。想真正训练模型时，一张免费 Colab 或本地 GPU 就够。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">不需要 · 线性代数熟练</div>
+      <p class="card__body">矩阵乘法会在第 3 章用「一排数字乘另一排数字」的方式讲清楚，不用先学完线性代数。</p>
+    </div>
+  </div>
+
+  <h2><span class="dot"></span>怎么读这本书</h2>
+
+  <ul>
+    <li><strong>别跳读代码。</strong>每一段代码都是能跑的，而且短到可以一行一行看。看懂 20 行 NumPy 比读 20 页公式有用。</li>
+    <li><strong>遇到 <span style="color:var(--violet)">紫色直觉框</span> 时慢下来。</strong>那通常是一个概念最关键的地方。</li>
+    <li><strong>动手玩每一个演示。</strong>拖动滑块、把学习率调到发散、把多项式次数拉到 12——破坏它，你才会真的懂它。</li>
+    <li><strong>看完一章做一次自测。</strong>每章末尾的折叠问答是最低成本的自我检查。</li>
+    <li><strong>随时按 <code>Aa</code> 调字号、按 <code>☾</code> 换暗色主题。</strong>长时间阅读，舒服比什么都重要。</li>
+  </ul>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>一个建议的节奏</div>
+    <p>
+      每天一章，21 天读完。第二部分（第 4-6 章）值得花三天——那是全书的承重墙。
+      第七部分的 mini-GPT 请务必亲手跑一遍，跑通之后你对大模型的恐惧会消失一大半。
+    </p>
+  </div>
+
+  <h2 id="toc"><span class="dot"></span>全部章节</h2>
+
+  <div class="grid-toc">
+    <a href="chapters/01-from-rules-to-learning.html"><span class="n">01</span><span><span class="t">从规则到学习</span><span class="d">程序写规则，模型学规则</span></span></a>
+    <a href="chapters/02-neuron-and-activation.html"><span class="n">02</span><span><span class="t">神经元与激活函数</span><span class="d">一个会投票的小单元</span></span></a>
+    <a href="chapters/03-forward-propagation.html"><span class="n">03</span><span><span class="t">多层网络与前向传播</span><span class="d">堆叠出来的表达能力</span></span></a>
+    <a href="chapters/04-gradient-descent.html"><span class="n">04</span><span><span class="t">梯度下降与优化器</span><span class="d">模型到底怎么变聪明</span></span></a>
+    <a href="chapters/05-backpropagation.html"><span class="n">05</span><span><span class="t">反向传播</span><span class="d">深度学习的发动机</span></span></a>
+    <a href="chapters/06-training-craft.html"><span class="n">06</span><span><span class="t">训练的艺术</span><span class="d">初始化、归一化、正则化与调试</span></span></a>
+    <a href="chapters/07-cnn.html"><span class="n">07</span><span><span class="t">卷积神经网络</span><span class="d">让网络看懂图像</span></span></a>
+    <a href="chapters/08-sequence-models.html"><span class="n">08</span><span><span class="t">序列模型与记忆</span><span class="d">RNN、LSTM 与梯度消失</span></span></a>
+    <a href="chapters/09-attention.html"><span class="n">09</span><span><span class="t">注意力机制</span><span class="d">Query、Key、Value 的魔法</span></span></a>
+    <a href="chapters/10-transformer.html"><span class="n">10</span><span><span class="t">Transformer 解剖</span><span class="d">一台完整的序列处理器</span></span></a>
+    <a href="chapters/11-language-models.html"><span class="n">11</span><span><span class="t">语言模型与 GPT</span><span class="d">预测下一个词，就够了</span></span></a>
+    <a href="chapters/12-pretraining.html"><span class="n">12</span><span><span class="t">大模型预训练</span><span class="d">数据、并行、精度与成本</span></span></a>
+    <a href="chapters/13-alignment.html"><span class="n">13</span><span><span class="t">对齐：SFT / RLHF / DPO</span><span class="d">从会说话到会帮忙</span></span></a>
+    <a href="chapters/14-inference.html"><span class="n">14</span><span><span class="t">推理与部署</span><span class="d">KV Cache、量化与采样</span></span></a>
+    <a href="chapters/15-fine-tuning.html"><span class="n">15</span><span><span class="t">微调与 LoRA</span><span class="d">用一张卡改造一个模型</span></span></a>
+    <a href="chapters/16-prompting.html"><span class="n">16</span><span><span class="t">提示工程与上下文学习</span><span class="d">把模型当同事</span></span></a>
+    <a href="chapters/17-rag.html"><span class="n">17</span><span><span class="t">检索增强生成 RAG</span><span class="d">给模型接一个外置记忆</span></span></a>
+    <a href="chapters/18-agents.html"><span class="n">18</span><span><span class="t">智能体与工具调用</span><span class="d">让模型自己动手做事</span></span></a>
+    <a href="chapters/19-evaluation.html"><span class="n">19</span><span><span class="t">评测、幻觉与安全</span><span class="d">怎么知道它到底行不行</span></span></a>
+    <a href="chapters/20-mini-gpt.html"><span class="n">20</span><span><span class="t">从零实现 mini-GPT</span><span class="d">三百行代码走完全程</span></span></a>
+    <a href="chapters/21-frontier.html"><span class="n">21</span><span><span class="t">前沿与展望</span><span class="d">MoE、多模态、长上下文与推理</span></span></a>
+  </div>
+
+  <h2><span class="dot"></span>符号约定</h2>
+
+  <p>全书符号统一如下，看到不认识的随时回来查。</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>符号</th><th>读作</th><th>含义</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>$x$</td><td>输入</td><td>一个样本的特征向量，例如一张图的像素</td></tr>
+        <tr><td>$y$</td><td>标签 / 目标</td><td>我们希望模型输出的正确答案</td></tr>
+        <tr><td>$\hat{y}$</td><td>y-hat</td><td>模型实际给出的预测值</td></tr>
+        <tr><td>$w,\ b$</td><td>权重、偏置</td><td>模型里可学习的参数</td></tr>
+        <tr><td>$\theta$</td><td>theta</td><td>所有参数的统称</td></tr>
+        <tr><td>$z$</td><td>z</td><td>线性部分的加权和（激活之前）</td></tr>
+        <tr><td>$a$</td><td>a</td><td>激活之后的输出（activation）</td></tr>
+        <tr><td>$\sigma$</td><td>sigma</td><td>Sigmoid 函数，也泛指任意激活函数</td></tr>
+        <tr><td>$L$ 或 $\mathcal{L}$</td><td>损失</td><td>衡量预测有多错的标量</td></tr>
+        <tr><td>$\nabla_\theta L$</td><td>梯度</td><td>损失对参数的偏导组成的向量</td></tr>
+        <tr><td>$\eta$ 或 $\alpha$</td><td>eta / alpha</td><td>学习率</td></tr>
+        <tr><td>$\odot$</td><td>Hadamard 积</td><td>两个同形状张量逐元素相乘</td></tr>
+        <tr><td>$d_k$</td><td>—</td><td>注意力中 Key 向量的维度</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer class="footer" style="margin-top:3rem">
+    <span>《深度学习之路》· 写给程序员的深度学习与大模型</span>
+    <span>用浏览器打开，无需联网即可阅读（公式渲染需联网）</span>
+  </footer>
+
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

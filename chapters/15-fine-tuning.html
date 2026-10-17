@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 15 章 · 微调与 LoRA — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="15">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 15 章 · 第五部 大模型工程</span>
+    <h1>微调与 LoRA</h1>
+    <p class="chapter-head__lead">
+      你几乎永远不需要从零训练一个大模型，但你很可能需要一个懂你业务的模型。
+      这一章讲微调——以及一个让这件事变得人人都能做的技巧：
+      <strong>LoRA 只训练原模型 0.1% 的参数</strong>，
+      让你用一张消费级显卡就能改造一个 33B 的模型。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 28 分钟</span>
+      <span>🎯 掌握 LoRA/QLoRA 的原理与实践</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>15.1 先问：真的需要微调吗？</h2>
+
+  <p>
+    这是最重要的一节。很多人在应该用提示工程或 RAG 的时候选择了微调，
+    浪费了几周时间和几千美元，最后效果还不如原来。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>你的需求</th><th>该用什么</th><th>为什么</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>让模型知道你的公司文档内容</td>
+          <td><strong>RAG</strong>（第 17 章）</td>
+          <td>知识是<em>会变的</em>。微调进权重的知识无法更新，也无法引用出处。
+            而且模型会「记混」，把相似的事实混在一起。</td>
+        </tr>
+        <tr>
+          <td>让模型按特定格式输出 JSON</td>
+          <td><strong>提示工程</strong> + 结构化输出</td>
+          <td>现代模型的指令遵循能力很强，一个好的提示 + 几个示例通常就够了。</td>
+        </tr>
+        <tr>
+          <td>让模型学会一种新的行为方式<br>（语气、推理风格、领域术语）</td>
+          <td><strong>微调</strong> ✅</td>
+          <td>这属于「风格」而不是「知识」。风格很难用提示描述清楚，
+            但用几百个例子就能教会。</td>
+        </tr>
+        <tr>
+          <td>降低推理成本 / 延迟</td>
+          <td><strong>微调小模型</strong> ✅</td>
+          <td>用一个 7B 的微调模型替代调用 GPT-4，成本能降两个数量级。</td>
+        </tr>
+        <tr>
+          <td>需要私有部署（数据不能出内网）</td>
+          <td><strong>微调 + 本地部署</strong> ✅</td>
+          <td>开源模型 + 微调是唯一的方案。</td>
+        </tr>
+        <tr>
+          <td>需要某个特定任务的极致准确率</td>
+          <td><strong>微调</strong> ✅</td>
+          <td>任务越窄、数据越专，微调的优势越大。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">一条简单的判断规则</div>
+    <p>
+      <strong>知识 → RAG。行为 → 微调。</strong>
+    </p>
+    <p>
+      想改变模型「知道什么」，用检索；想改变模型「怎么做」，用微调。
+      两者不冲突，实践中经常结合使用：先 RAG 提供事实，
+      再用微调过的模型以你想要的风格和格式输出。
+    </p>
+  </div>
+
+  <h2>15.2 全参数微调有多贵</h2>
+
+  <p>
+    「微调」最朴素的理解是把预训练模型拿来，用你的数据继续训练所有参数。
+    这叫<strong>全参数微调</strong>（Full Fine-Tuning），它的成本和预训练是同量级的。
+  </p>
+
+  <p>
+    回顾第 12 章讲的显存构成。一个 7B 模型全参数微调需要：
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>项目</th><th>精度</th><th>显存</th></tr></thead>
+      <tbody>
+        <tr><td>模型权重</td><td>bf16</td><td>14 GB</td></tr>
+        <tr><td>梯度</td><td>bf16</td><td>14 GB</td></tr>
+        <tr><td>Adam 一阶矩 + 二阶矩</td><td>fp32</td><td>56 GB</td></tr>
+        <tr><td>fp32 主权重</td><td>fp32</td><td>28 GB</td></tr>
+        <tr><td>激活值（取决于批量与序列长度）</td><td>—</td><td>10~30 GB</td></tr>
+        <tr><td><strong>合计</strong></td><td></td><td><strong>约 120~140 GB</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    也就是说，微调一个 7B 模型至少要两张 A100 80G，或者用 ZeRO-3 分片到 8 张卡上。
+    而如果你要微调 70B，那需要几十张卡——对个人和小团队来说完全不可行。
+  </p>
+
+  <p>
+    还有一个容易被忽略的问题：<strong>灾难性遗忘</strong>。
+    全参数微调会让模型在你的小数据集上「跑偏」，
+    原有的通用能力（对话、推理、写代码）会明显退化。
+  </p>
+
+  <h2>15.3 LoRA：一个漂亮的数学技巧</h2>
+
+  <p>
+    2021 年，微软的研究者提出了 <strong>LoRA</strong>（Low-Rank Adaptation）。
+    它的核心假设是：
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">LoRA 的核心假设</div>
+    <p>
+      微调时权重的<strong>变化量</strong> $\Delta W$ 是<strong>低秩</strong>的。
+    </p>
+    <p>
+      也就是说：从通用模型变成你的专用模型，不需要改动 70 亿个参数的方向，
+      只需要在一个很小的子空间里调整就够了。
+    </p>
+  </div>
+
+  <p>基于这个假设，LoRA 的做法是：</p>
+
+  <div class="formula">
+    $$h = W_0 x + \Delta W x = W_0 x + \underbrace{B A}_{\text{低秩分解}} x$$
+    <div class="formula__caption">
+      $W_0$ 是冻结的原始权重（$d \times k$），
+      $B$ 是 $d \times r$，$A$ 是 $r \times k$，且 $r \ll \min(d,k)$
+    </div>
+  </div>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 200" role="img" aria-label="LoRA 的结构示意图">
+      <defs>
+        <marker id="arLo" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--line-2)"></path>
+        </marker>
+      </defs>
+
+      <!-- 输入 -->
+      <text x="14" y="98" font-size="12" fill="var(--ink-2)" font-family="monospace">x</text>
+      <line x1="36" y1="94" x2="76" y2="94" stroke="var(--line-2)" stroke-width="1.6" marker-end="url(#arLo)"></line>
+
+      <!-- 冻结分支 -->
+      <rect x="82" y="60" width="130" height="68" rx="9" fill="var(--bg-alt)" stroke="var(--line-2)" stroke-dasharray="5 4"></rect>
+      <text x="147" y="88" font-size="12" fill="var(--ink-2)" text-anchor="middle" font-family="monospace">W₀</text>
+      <text x="147" y="108" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">冻结，不训练</text>
+      <text x="147" y="46" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">d × k</text>
+
+      <!-- LoRA 分支 -->
+      <rect x="82" y="150" width="58" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="111" y="175" font-size="12" fill="var(--accent)" text-anchor="middle" font-family="monospace">A</text>
+      <text x="111" y="140" font-size="10" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">r × k</text>
+
+      <line x1="140" y1="170" x2="168" y2="170" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arLo)"></line>
+
+      <rect x="172" y="150" width="58" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="201" y="175" font-size="12" fill="var(--accent)" text-anchor="middle" font-family="monospace">B</text>
+      <text x="201" y="140" font-size="10" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">d × r</text>
+
+      <text x="111" y="207" font-size="10" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">小随机初始化</text>
+      <text x="201" y="207" font-size="10" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">零初始化</text>
+
+      <!-- 合并 -->
+      <path d="M212,94 L248,94 L248,120 L272,120" stroke="var(--line-2)" stroke-width="1.6" fill="none" marker-end="url(#arLo)"></path>
+      <path d="M230,170 L248,170 L248,120" stroke="var(--accent)" stroke-width="1.6" fill="none"></path>
+
+      <circle cx="286" cy="120" r="14" fill="var(--brand-soft)" stroke="var(--brand-line)" stroke-width="2"></circle>
+      <text x="286" y="125" font-size="14" fill="var(--brand)" text-anchor="middle" font-family="sans-serif">+</text>
+
+      <line x1="300" y1="120" x2="340" y2="120" stroke="var(--line-2)" stroke-width="1.6" marker-end="url(#arLo)"></line>
+      <text x="360" y="125" font-size="12" fill="var(--ink-2)" font-family="monospace">h</text>
+
+      <!-- 说明 -->
+      <rect x="396" y="66" width="132" height="106" rx="9" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="462" y="88" font-size="10.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">参数量对比</text>
+      <text x="462" y="110" font-size="10" fill="var(--ink-3)" text-anchor="middle" font-family="monospace">原：d × k</text>
+      <text x="462" y="130" font-size="10" fill="var(--accent)" text-anchor="middle" font-family="monospace">LoRA：r × (d + k)</text>
+      <text x="462" y="156" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">r = 8 时约省 99%</text>
+    </svg>
+    <div class="figure__caption">
+      <b>LoRA 的结构。</b>原始权重 $W_0$ 完全冻结，
+      旁边挂两个小矩阵 $A$ 和 $B$。训练时只更新 $A$ 和 $B$，
+      前向传播时把两个分支的输出相加。
+    </div>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>为什么要「零初始化 B」？</div>
+    <p>
+      如果 $A$ 和 $B$ 都是随机的，那么训练刚开始时
+      $\Delta W = BA$ 就是一个随机矩阵——模型的行为会立刻被破坏。
+    </p>
+    <p>
+      把 $B$ 初始化为全 0，$\Delta W = 0$，<strong>模型在训练开始时和原模型完全一致</strong>。
+      然后随着训练，$\Delta W$ 逐渐从 0 长出来。
+      这是一个「平滑起步」的设计，让训练一开始就站在一个很好的点上。
+    </p>
+  </div>
+
+  <h3>前向传播时的细节</h3>
+
+  <p>LoRA 论文里还有一个容易被忽略的缩放因子：</p>
+
+  <div class="formula">
+    $$h = W_0 x + \frac{\alpha}{r} B A x$$
+    <div class="formula__caption">$\alpha$ 是一个常数（通常设为 $2r$），$\alpha/r$ 用来保持不同 $r$ 下的更新幅度一致</div>
+  </div>
+
+  <p>
+    为什么要这个缩放？因为当 $r$ 变化时，$BA$ 的数值尺度也会变。
+    如果不缩放，你换了 $r$ 之后就得重新调学习率。
+    有了 $\alpha/r$，你就可以固定 $\alpha$、自由地调整 $r$，
+    而不用重调其他超参数。
+  </p>
+
+  <h2>15.4 只训练 0.1% 的参数</h2>
+
+  <p>
+    LoRA 到底省了多少？用下面的计算器自己算：
+  </p>
+
+  <div class="widget" data-widget="lora">
+    <div class="widget__head"><span class="tag">交互 19</span>LoRA 可训练参数量计算器</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">模型维度 d_model</span><span class="ctrl__val" data-v="d">4096</span></div>
+            <input type="range" data-p="d" min="768" max="16384" step="256" value="4096">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">层数</span><span class="ctrl__val" data-v="L">32</span></div>
+            <input type="range" data-p="L" min="12" max="126" step="2" value="32">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">词表大小</span><span class="ctrl__val" data-v="V">32,000</span></div>
+            <input type="range" data-p="V" min="10000" max="200000" step="1000" value="32000">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">秩 r</span><span class="ctrl__val" data-v="r">8</span></div>
+            <input type="range" data-p="r" min="1" max="128" step="1" value="8">
+          </div>
+          <p style="font-size:.78rem;color:var(--ink-3);margin:1rem 0 .4rem">给哪些模块加 LoRA：</p>
+          <div class="btnrow">
+            <button class="btn" data-mod="q" aria-pressed="true">q</button>
+            <button class="btn" data-mod="k" aria-pressed="false">k</button>
+            <button class="btn" data-mod="v" aria-pressed="true">v</button>
+            <button class="btn" data-mod="o" aria-pressed="true">o</button>
+            <button class="btn" data-mod="w1" aria-pressed="false">w1</button>
+            <button class="btn" data-mod="w3" aria-pressed="false">w3</button>
+            <button class="btn" data-mod="w2" aria-pressed="false">w2</button>
+          </div>
+        </div>
+        <div>
+          <div class="bars" data-role="bars" style="margin-bottom:.9rem"></div>
+          <div class="readout" data-role="info"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        试着把 r 从 8 拖到 128：可训练参数涨了 16 倍，但相对于总参数量依然很小。
+        再点开 w1/w3/w2：你会发现 FFN 层的 LoRA 参数量远大于注意力层，
+        因为 FFN 的矩阵是 $4d \times d$，比注意力的 $d \times d$ 大 4 倍。
+        <br><br>
+        <strong>实践建议：</strong>r 取 8~64 通常够用。如果任务复杂（比如学习新的推理方式），
+        用更大的 r 并加上 FFN 层；如果只是调整语气格式，r=8 只调 q、v 就够了。
+      </p>
+    </div>
+  </div>
+
+  <h2>15.5 QLoRA：把基座模型也量化</h2>
+
+  <p>
+    LoRA 省了优化器状态的显存，但<strong>基座模型本身还是 fp16</strong>，
+    7B 模型仍要 14 GB。对只有一张 24GB 显卡的人来说还是紧张。
+  </p>
+
+  <p>
+    2023 年的 <strong>QLoRA</strong> 进一步解决了这个问题：<strong>把冻结的基座模型量化成 4-bit</strong>。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>方案</th><th>7B 模型显存</th><th>33B 模型显存</th><th>65B 模型显存</th></tr></thead>
+      <tbody>
+        <tr><td>全参数微调</td><td>约 120 GB</td><td>约 550 GB</td><td>约 1100 GB</td></tr>
+        <tr><td>LoRA（bf16 基座）</td><td>约 22 GB</td><td>约 90 GB</td><td>约 175 GB</td></tr>
+        <tr><td><strong>QLoRA（4-bit 基座）</strong></td><td><strong>约 8 GB</strong></td><td><strong>约 24 GB</strong></td><td><strong>约 48 GB</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    看最后一行：<strong>QLoRA 让一张 24GB 的消费级显卡（比如 RTX 4090）能微调 33B 的模型。</strong>
+    这直接把微调从「需要数据中心」变成了「一台游戏电脑就能做」。
+  </p>
+
+  <h3>QLoRA 的三个关键技术</h3>
+
+  <ol>
+    <li>
+      <strong>NF4 量化。</strong>不是普通的均匀量化，而是假设权重服从正态分布，
+      在分布密集的区域用更细的量化级别。信息论上这是对正态分布最优的 4-bit 表示。
+    </li>
+    <li>
+      <strong>双重量化。</strong>量化本身需要存储缩放系数（每个 64 个权重一个 fp32）。
+      双重量化把这些缩放系数再量化一次，每个参数平均再省 0.37 bit。
+      听起来很少，但对 65B 模型就是 3 GB。
+    </li>
+    <li>
+      <strong>分页优化器。</strong>用 NVIDIA 的统一内存，在显存峰值时自动把优化器状态
+      换出到内存。避免因为一个瞬时峰值而 OOM。
+    </li>
+  </ol>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>QLoRA 的代价</div>
+    <p>
+      4-bit 基座 + bf16 LoRA 的混合精度计算，<strong>速度比纯 bf16 LoRA 慢约 20%~40%</strong>，
+      因为每次前向都要把 4-bit 权重反量化。
+    </p>
+    <p>
+      所以取舍是：<strong>显存换时间</strong>。如果你有足够的显存，用 bf16 LoRA 更快；
+      如果显存是瓶颈，QLoRA 让你能做这件事（而不是做不了）。
+    </p>
+  </div>
+
+  <h2>15.6 完整代码：用 PEFT 微调一个模型</h2>
+
+  <div class="codeblock" data-lang="python" data-title="lora_finetune.py — 完整的 LoRA 微调脚本">
+<script type="text/dlcode">
+import torch
+from datasets import load_dataset
+from transformers import (
+    AutoModelForCausalLM, AutoTokenizer,
+    TrainingArguments, Trainer, DataCollatorForSeq2Seq,
+)
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+
+MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
+
+# ---------- 1. 加载模型（4-bit 量化，QLoRA）----------
+from transformers import BitsAndBytesConfig
+bnb = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",              # NF4 量化
+    bnb_4bit_compute_dtype=torch.bfloat16,  # 计算时用 bf16
+    bnb_4bit_use_double_quant=True,         # 双重量化
+)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID, quantization_config=bnb, device_map="auto",
+)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+# 准备 k-bit 训练：冻结基座、开启梯度检查点
+model = prepare_model_for_kbit_training(model)
+model.gradient_checkpointing_enable()   # 用时间换显存
+
+# ---------- 2. 挂上 LoRA ----------
+lora_config = LoraConfig(
+    r=16,                       # 秩。8~64 通常够用
+    lora_alpha=32,              # 通常设为 2r
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+    # 目标模块：注意不同模型的命名不同（LLaMA 是 q_proj/k_proj/v_proj/o_proj）
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+)
+model = get_peft_model(model, lora_config)
+model.print_trainable_parameters()
+# trainable params: 40,370,176 || all params: 7,655,986,688 || trainable%: 0.527
+
+# ---------- 3. 准备数据 ----------
+def format_example(example):
+    """把样本转成对话格式，并且只对 assistant 部分计算损失"""
+    messages = [
+        {"role": "system", "content": "你是一位专业的法律顾问。"},
+        {"role": "user",   "content": example["question"]},
+        {"role": "assistant","content": example["answer"]},
+    ]
+    text = tokenizer.apply_chat_template(messages, tokenize=False)
+    enc = tokenizer(text, truncation=True, max_length=1024)
+    # 找到 assistant 开始的位置，之前的部分 mask 掉
+    prompt_text = tokenizer.apply_chat_template(
+        messages[:-1], tokenize=False, add_generation_prompt=True
+    )
+    prompt_len = len(tokenizer(prompt_text)["input_ids"])
+    enc["labels"] = [-100] * prompt_len + enc["input_ids"][prompt_len:]
+    return enc
+
+dataset = load_dataset("json", data_files="legal_qa.jsonl", split="train")
+dataset = dataset.map(format_example, remove_columns=dataset.column_names)
+
+# ---------- 4. 训练 ----------
+args = TrainingArguments(
+    output_dir="./lora-out",
+    num_train_epochs=3,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=16,      # 等效批量 = 1 × 16 = 16
+    learning_rate=2e-4,                  # LoRA 的学习率比全参数微调大 10~100 倍
+    lr_scheduler_type="cosine",
+    warmup_ratio=0.03,
+    bf16=True,
+    logging_steps=10,
+    save_strategy="epoch",
+    gradient_checkpointing=True,
+    optim="paged_adamw_8bit",            # 分页 + 8bit 优化器，进一步省显存
+    report_to="none",
+)
+
+trainer = Trainer(
+    model=model,
+    args=args,
+    train_dataset=dataset,
+    data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True),
+)
+trainer.train()
+
+# ---------- 5. 保存 ----------
+# 只保存 LoRA 适配器，通常只有几十 MB
+model.save_pretrained("./lora-adapter")
+tokenizer.save_pretrained("./lora-adapter")
+</script>
+  </div>
+
+  <h3>合并权重并部署</h3>
+
+  <div class="codeblock" data-lang="python" data-title="merge_and_deploy.py">
+<script type="text/dlcode">
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+# 方式一：合并成一个完整的模型（推理最快，没有额外开销）
+base = AutoModelForCausalLM.from_pretrained(
+    "Qwen/Qwen2.5-7B-Instruct", torch_dtype=torch.bfloat16, device_map="auto"
+)
+model = PeftModel.from_pretrained(base, "./lora-adapter")
+model = model.merge_and_peft() if hasattr(model, "merge_and_peft") else model.merge_and_unload()
+model.save_pretrained("./merged-model")     # 现在是一个普通的 HF 模型
+
+# 方式二：保持分离（可以在一个基座上挂多个适配器，动态切换）
+base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+model = PeftModel.from_pretrained(base, "./lora-adapter")
+# 换一个适配器（比如从"法律"切到"医疗"）
+model.load_adapter("./medical-adapter", adapter_name="medical")
+model.set_adapter("medical")
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>「一个基座 + 多个适配器」的价值</div>
+    <p>
+      每个 LoRA 适配器只有几十 MB，而基座模型是 14 GB。
+      这意味着你可以<strong>用一份基座，挂上几十个不同任务的适配器</strong>，
+      在推理时动态切换。
+    </p>
+    <p>
+      这对多租户的 SaaS 服务非常有价值：
+      每个客户有自己专属的适配器，但共享同一份基座权重，
+      显存占用几乎不增加。这是 LoRA 相比全参数微调最实用的优势之一。
+    </p>
+  </div>
+
+  <h2>15.7 超参数怎么选</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>参数</th><th>推荐值</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>秩 r</strong></td>
+          <td>8 ~ 64</td>
+          <td>任务越复杂、数据越多，r 越大。简单风格调整 r=8 够，学新能力用 32~64。
+            超过 128 通常没有额外收益。</td>
+        </tr>
+        <tr>
+          <td><strong>lora_alpha</strong></td>
+          <td>2r</td>
+          <td>固定用 2r 是社区惯例，能让你自由调 r 而不用重调学习率。</td>
+        </tr>
+        <tr>
+          <td><strong>learning rate</strong></td>
+          <td>1e-4 ~ 3e-4</td>
+          <td><strong>比全参数微调大 10~100 倍</strong>。因为只训练少量参数，
+            需要更大的步长才能有效更新。这是新手最容易设错的地方。</td>
+        </tr>
+        <tr>
+          <td><strong>target_modules</strong></td>
+          <td>q,k,v,o + FFN 全部</td>
+          <td>只调 q、v 是原始论文的省钱配置；加上 FFN 效果更好，
+            因为 FFN 存了大部分事实知识。</td>
+        </tr>
+        <tr>
+          <td><strong>epochs</strong></td>
+          <td>2 ~ 5</td>
+          <td>LoRA 很容易过拟合。超过 5 轮通常开始退化，
+            尤其是数据量小的时候。</td>
+        </tr>
+        <tr>
+          <td><strong>数据量</strong></td>
+          <td>500 ~ 10000 条</td>
+          <td>质量比数量重要。500 条精挑的数据能显著改变模型风格；
+            想学新知识则需要更多。</td>
+        </tr>
+        <tr>
+          <td><strong>lora_dropout</strong></td>
+          <td>0.05 ~ 0.1</td>
+          <td>数据量少时调高一点防止过拟合。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>三个最常见的翻车原因</div>
+    <p>
+      <strong>1. 学习率设成 2e-5。</strong>这是全参数微调的学习率。
+      LoRA 只训练少量参数，用这么小的学习率几乎学不动。
+      看到「loss 一直在 2.3 附近不动」时，第一反应应该是「学习率太小了」。
+    </p>
+    <p>
+      <strong>2. 训练和推理的对话模板不一致。</strong>
+      训练时用了 <code>apply_chat_template</code>，
+      推理时手写 prompt 格式不同，模型就完全不知道该干什么。
+      <strong>一定要用同一套模板。</strong>
+    </p>
+    <p>
+      <strong>3. 对指令部分也计算损失。</strong>
+      这会让模型学会「生成问题」而不是「回答问题」。
+      表现为：你问它问题，它给你生成更多问题。
+    </p>
+  </div>
+
+  <h2>15.8 其他 PEFT 方法</h2>
+
+  <p>LoRA 不是唯一的参数高效微调方法。了解它们的思路有助于选择合适的工具：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>方法</th><th>核心思路</th><th>可训练参数</th><th>特点</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Adapter</strong></td>
+          <td>在层之间插入小的瓶颈网络</td>
+          <td>3~5%</td>
+          <td>最早的方法，会<strong>增加推理延迟</strong>（因为层变多了）</td>
+        </tr>
+        <tr>
+          <td><strong>Prefix Tuning</strong></td>
+          <td>在每层前面拼接一段可学习的「虚拟 token」</td>
+          <td>0.1~1%</td>
+          <td>参数极少，但占用上下文长度，训练不稳定</td>
+        </tr>
+        <tr>
+          <td><strong>Prompt Tuning</strong></td>
+          <td>只在输入层加一段可学习的 soft prompt</td>
+          <td>0.01%</td>
+          <td>参数最少，但效果随模型变小而急剧下降</td>
+        </tr>
+        <tr>
+          <td><strong>LoRA</strong></td>
+          <td>低秩分解权重增量</td>
+          <td>0.1~1%</td>
+          <td><strong>可以合并回原权重，推理零开销</strong>。当前的主流</td>
+        </tr>
+        <tr>
+          <td><strong>IA³</strong></td>
+          <td>用向量缩放激活值</td>
+          <td>0.01%</td>
+          <td>参数极少，效果接近 LoRA</td>
+        </tr>
+        <tr>
+          <td><strong>DoRA</strong></td>
+          <td>把权重分解成「方向」和「大小」，分别微调</td>
+          <td>略多于 LoRA</td>
+          <td>效果通常略优于 LoRA，但更慢</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">LoRA 最大的工程优势</div>
+    <p>
+      它是上表里<strong>唯一一个「推理时零额外开销」</strong>的方法。
+    </p>
+    <p>
+      因为 $W_{\text{new}} = W_0 + BA$ 可以<strong>直接算出来并合并回原权重</strong>。
+      合并后模型就是一个普通的 Transformer，没有任何额外的层或计算。
+    </p>
+    <p>
+      Adapter 和 Prefix Tuning 都会在推理时引入额外的计算或上下文占用。
+      在要求低延迟的生产环境里，这一点往往比「效果好 0.5 个点」更重要。
+    </p>
+  </div>
+
+  <h2>15.9 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">全参数微调 <small>FFT</small></div>
+      <div class="gloss__def">更新模型所有参数。显存需求高（7B 要 120GB），容易灾难性遗忘。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">LoRA</div>
+      <div class="gloss__def">冻结原权重，只训练两个低秩矩阵 $A$、$B$。可训练参数降至 0.1%~1%。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">秩 <small>rank, r</small></div>
+      <div class="gloss__def">低秩矩阵的中间维度。越大容量越强，但参数也越多。通常 8~64。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">QLoRA</div>
+      <div class="gloss__def">把冻结的基座量化成 4-bit，让消费级显卡能微调 33B 模型。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">PEFT</div>
+      <div class="gloss__def">参数高效微调的总称。LoRA、Adapter、Prefix Tuning 等都属于这一类。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">灾难性遗忘</div>
+      <div class="gloss__def">在新任务上训练导致原有能力退化。LoRA 因为冻结基座，天然缓解这个问题。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>先判断需求：<strong>知识用 RAG，行为用微调。</strong>大部分场景不需要微调。</li>
+    <li>全参数微调的显存需求是预训练级别的，7B 就要 120 GB。</li>
+    <li>LoRA 的核心假设是「权重变化量是低秩的」，用 $BA$ 近似 $\Delta W$。</li>
+    <li>$B$ 零初始化让训练从「和原模型完全一致」开始，是 LoRA 稳定性的关键。</li>
+    <li>QLoRA 把基座量化到 4-bit，让 24GB 显卡能微调 33B 模型，代价是慢 20~40%。</li>
+    <li>LoRA 学习率要比全参数微调<strong>大 10~100 倍</strong>（1e-4 量级），这是最常见的错误。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>公司想让你做一个「懂内部文档的问答助手」，你会选 RAG 还是微调？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>RAG</strong>，而且几乎没有犹豫的余地。四个理由：
+        </p>
+        <p>
+          <strong>① 文档会变。</strong>公司制度、产品文档每周都在更新。
+          微调进权重的知识是「冻结」的，要更新就得重新训练。
+          RAG 只要更新向量库，几分钟就能生效。
+        </p>
+        <p>
+          <strong>② 需要引用出处。</strong>内部问答场景下，用户需要知道答案来自哪个文档。
+          微调模型无法给出出处，而 RAG 天然可以。
+        </p>
+        <p>
+          <strong>③ 模型会记混。</strong>微调把知识压进参数里，
+          相似的条款容易被混淆（「年假 15 天」和「病假 15 天」可能串了）。
+          RAG 是精确检索，不会混。
+        </p>
+        <p>
+          <strong>④ 成本更低、迭代更快。</strong>RAG 不需要 GPU 训练，调试周期是天级而不是周级。
+        </p>
+        <p>
+          微调在这里唯一可能的用处是：让模型学会<strong>以公司期望的口吻和格式</strong>
+          回答（比如必须分点、必须给出处链接）。这是「行为」，不是「知识」。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么 LoRA 的 B 矩阵要初始化为 0？</summary>
+      <div class="quiz__answer">
+        <p>
+          为了<strong>让训练从一个「模型行为完全不变」的起点开始</strong>。
+        </p>
+        <p>
+          如果 $A$ 和 $B$ 都随机初始化，那么 $\Delta W = BA$ 就是一个随机矩阵。
+          前向传播时 $h = W_0x + BAx$，第二项是一个随机扰动——
+          相当于你在一个训练好的模型上加了一堆噪声，模型能力立刻被破坏。
+          训练初期需要先「修复」这个破坏，浪费了大量步数。
+        </p>
+        <p>
+          把 $B$ 初始化为 0 后，$\Delta W = 0$，模型行为和原模型完全一致。
+          然后随着训练，$\Delta W$ 从 0 平滑地长出来。
+        </p>
+        <p>
+          这也解释了为什么 LoRA 通常不需要 warmup——
+          它的起点本来就是一个很好的点，不像随机初始化的模型需要小心起步。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>LoRA 微调时，学习率应该设成多少？为什么？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>1e-4 到 3e-4</strong>，也就是比全参数微调（通常 1e-5 ~ 2e-5）大 10~100 倍。
+        </p>
+        <p>
+          原因：全参数微调时，每个参数都在被更新，整体的更新量累积起来很大。
+          而 LoRA 只训练 0.1%~1% 的参数，如果还用那么小的学习率，
+          这些参数几乎不会移动，模型也就学不到东西。
+        </p>
+        <p>
+          实际表现就是：loss 一直卡在 2.3（随机猜测的水平）附近不动。
+          这时候第一反应应该是「学习率是不是太小了」，而不是怀疑数据或代码。
+        </p>
+        <p>
+          另外注意 LoRA 的学习率上限通常比全参数微调更敏感——
+          设成 1e-3 以上容易训练不稳定。所以 1e-4 ~ 3e-4 是比较安全的区间。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>QLoRA 用了 4-bit 量化，为什么还能训出 bf16 精度的 LoRA 适配器？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为<strong>量化的只是「冻结的基座」，LoRA 适配器本身始终是 bf16 的</strong>。
+        </p>
+        <p>
+          前向传播时的流程是：
+          ① 从 4-bit 存储的 $W_0$ 反量化成 bf16；
+          ② 用 bf16 计算 $W_0x$ 和 $BAx$，两者相加得到输出。
+        </p>
+        <p>
+          所以只有 $W_0$ 的<strong>存储</strong>是 4-bit 的，
+          计算过程全程是 bf16。这带来的精度损失很小——因为
+          $W_0$ 是冻结的，它只需要「大致正确」就够了，
+          真正需要精细调整的部分（$\Delta W$）保留了完整精度。
+        </p>
+        <p>
+          这也是 QLoRA 论文的核心发现：
+          <strong>量化冻结的权重对最终效果影响很小，而量化被训练的权重才是灾难。</strong>
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么说「一个基座 + 多个 LoRA 适配器」很有价值？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为<strong>适配器的体积只有基座模型的千分之几</strong>。
+        </p>
+        <p>
+          一个 7B 模型是 14 GB，而一个 LoRA 适配器（r=16，全模块）通常只有 50~200 MB。
+          这意味着你可以用一份基座权重，挂上几十上百个不同任务的适配器。
+        </p>
+        <p>
+          实际价值体现在几个方面：
+        </p>
+        <p>
+          <strong>① 多租户 SaaS：</strong>每个客户有自己的适配器，但共享同一份基座，
+          显存占用几乎不增加，还能按需动态切换。
+        </p>
+        <p>
+          <strong>② 版本管理与 A/B 测试：</strong>适配器体积小，易于存储、分发和回滚。
+          可以同时部署多个版本做对比实验。
+        </p>
+        <p>
+          <strong>③ 快速迭代：</strong>发现某个任务效果不好，重新训一个适配器只要几小时，
+          不需要重新部署整个模型。
+        </p>
+        <p>
+          这是 LoRA 相比全参数微调在<strong>工程上</strong>最实用的优势——
+          它把「模型」变成了「基座 + 可插拔的插件」。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    第五部分结束了。你现在理解了从预训练到对齐、从推理到微调的完整工程链路。
+  </p>
+
+  <p>
+    第六部分转向<strong>应用</strong>。第一个话题是提示工程——
+    它是使用大模型最便宜、最快、也最被低估的手段。
+  </p>
+
+  <p>
+    很多人以为提示工程是「玄学」或者「说好话让模型高兴」。
+    但下一章你会看到，它其实是一套有明确原理的方法论：
+    <strong>上下文学习为什么有效、思维链为什么能提升推理、
+    以及为什么「把模型当同事」比「把模型当搜索框」效果好得多。</strong>
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

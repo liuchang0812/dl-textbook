@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 17 章 · 检索增强生成 RAG — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="17">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 17 章 · 第六部 应用篇</span>
+    <h1>检索增强生成 RAG</h1>
+    <p class="chapter-head__lead">
+      模型不知道你的私有数据，也不知道昨天发生了什么。
+      RAG 的解法是让它<strong>开卷考试</strong>：先从你的资料库里检索相关内容，
+      再把它们塞进提示词，让模型基于这些材料回答。
+      这一章讲清楚整条流水线，以及为什么 <strong>90% 的 RAG 问题都出在检索，而不是生成</strong>。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 28 分钟</span>
+      <span>🎯 能独立设计并调优一个 RAG 系统</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>17.1 为什么要 RAG</h2>
+
+  <p>
+    大模型有三个无法通过提示工程解决的限制：
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">① 不知道私有数据</div>
+      <p class="card__body">
+        模型只见过公开数据。你公司的制度、产品文档、客户记录，它一概不知。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">② 知识有截止日期</div>
+      <p class="card__body">
+        训练数据截止到某个时间点。之后发生的事情，模型完全不知道。
+        而且重训一次的成本是千万美元级别。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">③ 无法给出出处</div>
+      <p class="card__body">
+        即使它「碰巧」答对了，你也无法验证。在严肃场景下，
+        没有出处的答案等于没有答案。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">④ 会自信地编造</div>
+      <p class="card__body">
+        不知道答案时，模型不会说「不知道」，而是生成一个听起来很合理的答案。
+        这是第 19 章要讲的幻觉问题。
+      </p>
+    </div>
+  </div>
+
+  <p>
+    RAG（Retrieval-Augmented Generation，检索增强生成）一次性解决这四个问题。
+    它的核心思想朴素得让人意外：
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">RAG 的本质</div>
+    <p>
+      <strong>与其让模型「记住」知识，不如在回答时把相关资料递给它。</strong>
+    </p>
+    <p>
+      这就像考试：闭卷考试要求你把所有知识背下来，
+      而开卷考试只要求你会查资料。
+      人类的专业知识工作几乎都是开卷的——律师、医生、工程师，
+      没有人靠记忆力工作，他们靠的是检索和判断。
+    </p>
+    <p>
+      RAG 让模型也这样做。而且知识更新变得极其简单：
+      <strong>改向量库就行，不用重新训练模型。</strong>
+    </p>
+  </div>
+
+  <h2>17.2 完整流水线</h2>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 330" role="img" aria-label="RAG 的完整流水线">
+      <defs>
+        <marker id="arG" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--line-2)"></path>
+        </marker>
+      </defs>
+
+      <!-- 离线索引 -->
+      <text x="14" y="18" font-size="11.5" font-weight="700" fill="var(--brand)" font-family="sans-serif">离线：建立索引（做一次，定期更新）</text>
+      <g font-family="sans-serif" font-size="10">
+        <rect x="14" y="30" width="88" height="36" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="58" y="52" fill="var(--brand)" text-anchor="middle">原始文档</text>
+
+        <rect x="118" y="30" width="88" height="36" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="162" y="47" fill="var(--brand)" text-anchor="middle">切分成块</text>
+        <text x="162" y="60" fill="var(--ink-4)" text-anchor="middle" font-size="9">chunking</text>
+
+        <rect x="222" y="30" width="88" height="36" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="266" y="47" fill="var(--brand)" text-anchor="middle">嵌入模型</text>
+        <text x="266" y="60" fill="var(--ink-4)" text-anchor="middle" font-size="9">embedding</text>
+
+        <rect x="326" y="30" width="88" height="36" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="370" y="47" fill="var(--brand)" text-anchor="middle">存入向量库</text>
+        <text x="370" y="60" fill="var(--ink-4)" text-anchor="middle" font-size="9">+ 索引</text>
+      </g>
+      <g stroke="var(--line-2)" stroke-width="1.5" fill="none" marker-end="url(#arG)">
+        <line x1="104" y1="48" x2="116" y2="48"></line>
+        <line x1="208" y1="48" x2="220" y2="48"></line>
+        <line x1="312" y1="48" x2="324" y2="48"></line>
+      </g>
+
+      <!-- 在线查询 -->
+      <text x="14" y="112" font-size="11.5" font-weight="700" fill="var(--violet)" font-family="sans-serif">在线：回答一次提问（每次请求）</text>
+      <g font-family="sans-serif" font-size="10">
+        <rect x="14" y="124" width="88" height="36" rx="7" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="58" y="146" fill="var(--violet)" text-anchor="middle">用户提问</text>
+
+        <rect x="118" y="124" width="88" height="36" rx="7" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="162" y="141" fill="var(--violet)" text-anchor="middle">查询改写</text>
+        <text x="162" y="154" fill="var(--ink-4)" text-anchor="middle" font-size="9">可选但推荐</text>
+
+        <rect x="222" y="124" width="88" height="36" rx="7" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="266" y="141" fill="var(--violet)" text-anchor="middle">向量检索</text>
+        <text x="266" y="154" fill="var(--ink-4)" text-anchor="middle" font-size="9">Top-K</text>
+
+        <rect x="326" y="124" width="88" height="36" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+        <text x="370" y="141" fill="var(--accent)" text-anchor="middle">重排序</text>
+        <text x="370" y="154" fill="var(--ink-4)" text-anchor="middle" font-size="9">rerank</text>
+
+        <rect x="430" y="124" width="96" height="36" rx="7" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="478" y="141" fill="var(--violet)" text-anchor="middle">拼进提示词</text>
+        <text x="478" y="154" fill="var(--ink-4)" text-anchor="middle" font-size="9">+ 生成答案</text>
+      </g>
+      <g stroke="var(--line-2)" stroke-width="1.5" fill="none" marker-end="url(#arG)">
+        <line x1="104" y1="142" x2="116" y2="142"></line>
+        <line x1="208" y1="142" x2="220" y2="142"></line>
+        <line x1="312" y1="142" x2="324" y2="142"></line>
+        <line x1="416" y1="142" x2="428" y2="142"></line>
+      </g>
+
+      <!-- 从向量库到检索 -->
+      <path d="M370,68 L370,120" stroke="var(--line-2)" stroke-width="1.5" fill="none" stroke-dasharray="5 4" marker-end="url(#arG)"></path>
+
+      <!-- 输出 -->
+      <rect x="118" y="196" width="408" height="52" rx="9" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="322" y="216" font-size="10.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">
+        提示词 = 系统指令 + 检索到的文档（带编号）+ 用户问题
+      </text>
+      <text x="322" y="235" font-size="10.5" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">
+        要求模型只基于这些文档回答，并标注引用编号
+      </text>
+      <path d="M478,164 L478,192" stroke="var(--line-2)" stroke-width="1.5" fill="none" marker-end="url(#arG)"></path>
+
+      <!-- 失败点 -->
+      <rect x="14" y="268" width="512" height="50" rx="9" fill="var(--danger-soft)" stroke="var(--danger)" opacity=".85"></rect>
+      <text x="270" y="288" font-size="10.5" fill="var(--danger)" text-anchor="middle" font-family="sans-serif">
+        ⚠ 90% 的 RAG 失败发生在「检索」环节，而不是生成环节
+      </text>
+      <text x="270" y="307" font-size="10.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">
+        检索没找到正确的文档 → 模型再强也只能基于错误的材料回答
+      </text>
+    </svg>
+    <div class="figure__caption">
+      <b>RAG 的完整流水线。</b>上半部分是离线索引（做一次），
+      下半部分是在线查询（每次请求都跑）。中间用向量库连接。
+    </div>
+  </div>
+
+  <h2>17.3 分块：最容易被忽视的关键环节</h2>
+
+  <p>
+    文档不能整篇塞进向量库——一份 100 页的 PDF 变成一个向量，
+    会让所有细节都被平均掉，检索出来也没用。所以要切成小块。
+  </p>
+
+  <p>但切法非常讲究：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>策略</th><th>做法</th><th>优点</th><th>缺点</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>固定长度</strong></td>
+          <td>每 512 个 token 切一块</td>
+          <td>简单，块大小一致</td>
+          <td>可能从句子中间切断，语义不完整</td>
+        </tr>
+        <tr>
+          <td><strong>按结构切</strong></td>
+          <td>按标题、段落、列表项切</td>
+          <td>保留语义完整性 ✅</td>
+          <td>块大小差异大</td>
+        </tr>
+        <tr>
+          <td><strong>递归切分</strong></td>
+          <td>先按大结构切，超长再按小结构切</td>
+          <td>兼顾语义与大小 ✅</td>
+          <td>实现稍复杂</td>
+        </tr>
+        <tr>
+          <td><strong>语义切分</strong></td>
+          <td>用嵌入模型检测语义边界</td>
+          <td>边界最自然</td>
+          <td>慢，且提升不稳定</td>
+        </tr>
+        <tr>
+          <td><strong>父子块</strong></td>
+          <td>检索用小块的向量，返回时给父块</td>
+          <td>检索准 + 上下文全 ✅✅</td>
+          <td>需要额外存储结构</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>分块的五个实用建议</div>
+    <p>
+      <strong>1. 块大小 200~800 token 是常见的甜点区。</strong>
+      太小会丢失上下文（「它增长了 15%」——什么增长了？），
+      太大则检索精度下降（一个块里混了太多主题，向量被平均）。
+    </p>
+    <p>
+      <strong>2. 一定要有重叠（overlap）。</strong>
+      相邻块之间重叠 10%~20%，防止关键信息正好落在切分点上被割裂。
+    </p>
+    <p>
+      <strong>3. 给每个块加上下文头。</strong>
+      在块的开头补上「文档标题 + 章节名」，
+      这样即使块本身很短，向量也能携带全局信息。
+      这是最简单有效的改进之一。
+    </p>
+    <p>
+      <strong>4. 保留元数据。</strong>文档来源、更新时间、权限标签。
+      检索时可以按元数据过滤，也方便在答案里标注出处。
+    </p>
+    <p>
+      <strong>5. 表格和代码要特殊处理。</strong>
+      直接按字符切会把表格切得面目全非。
+      表格应该整体作为一个块，或者转换成 Markdown 保留结构。
+    </p>
+  </div>
+
+  <h2>17.4 向量检索：把语义变成距离</h2>
+
+  <p>
+    嵌入模型把文本映射成一个高维向量，语义相近的文本向量也相近。
+    检索就是找出与查询向量最接近的几个文档块。
+  </p>
+
+  <div class="formula">
+    $$\text{similarity}(\mathbf{q}, \mathbf{d}) = \frac{\mathbf{q} \cdot \mathbf{d}}{|\mathbf{q}||\mathbf{d}|}$$
+    <div class="formula__caption">余弦相似度，只看向量方向，不看长度。范围 -1 到 1，越接近 1 越相似</div>
+  </div>
+
+  <p>亲手看一下检索的过程：</p>
+
+  <div class="widget" data-widget="retrieval">
+    <div class="widget__head"><span class="tag">交互 20</span>向量检索：为什么 Top-K 里有垃圾</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <canvas data-h="340"></canvas>
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">Top-K（检索几条）</span><span class="ctrl__val" data-v="k">3</span></div>
+            <input type="range" data-p="k" min="1" max="8" step="1" value="3">
+          </div>
+          <p style="font-size:.78rem;color:var(--ink-3);margin:.9rem 0 .5rem">检索结果排名</p>
+          <div class="bars" data-role="list"></div>
+          <div class="readout" data-role="info" style="margin-top:.9rem"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        橙色点是查询，蓝点是被检索到的文档块。虚线表示「被选中」。
+        试着把 K 调到 5——你会发现排名 3、4、5 的「病假 / 产假 / 加班」虽然
+        在向量空间里离「年假」很近，但它们<strong>并不回答这个问题</strong>。
+        这就是为什么需要重排序。
+      </p>
+    </div>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>纯向量检索的三个盲区</div>
+    <p>
+      <strong>1. 精确匹配很差。</strong>查询「错误码 E4021」，
+      向量检索可能返回一堆「其他错误码」的文档，因为它们在语义上相似。
+      但它找不到那个<em>精确</em>包含 E4021 的文档。
+    </p>
+    <p>
+      <strong>2. 对否定和数字不敏感。</strong>
+      「不含防腐剂的食品」和「含防腐剂的食品」在向量空间里非常接近。
+    </p>
+    <p>
+      <strong>3. 语义相近 ≠ 能回答问题。</strong>
+      就像上面的演示：所有请假制度文档都语义相近，
+      但只有关于年假的那几条能回答问题。
+    </p>
+    <p>
+      这三个盲区正是「混合检索」和「重排序」存在的原因。
+    </p>
+  </div>
+
+  <h2>17.5 混合检索：向量 + 关键词</h2>
+
+  <p>
+    既然向量检索不擅长精确匹配，那就把它和传统的关键词检索结合起来。
+    这就是<strong>混合检索</strong>（Hybrid Search）。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>方法</th><th>原理</th><th>擅长</th><th>不擅长</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>BM25</strong>（稀疏）</td>
+          <td>基于词频和逆文档频率</td>
+          <td>精确关键词、专有名词、错误码</td>
+          <td>同义词、语义改写</td>
+        </tr>
+        <tr>
+          <td><strong>向量检索</strong>（稠密）</td>
+          <td>语义嵌入 + 余弦相似度</td>
+          <td>语义相似、跨语言、模糊描述</td>
+          <td>精确匹配、罕见词</td>
+        </tr>
+        <tr>
+          <td><strong>混合检索</strong></td>
+          <td>两路并行，融合排序</td>
+          <td>两者兼得 ✅</td>
+          <td>需要调融合权重</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>融合方法：RRF</h3>
+
+  <p>
+    两路检索的分数尺度不同，不能直接相加。常用<strong>倒数排序融合</strong>（RRF）：
+  </p>
+
+  <div class="formula">
+    $$\text{RRF}(d) = \sum_{r \in \text{检索器}} \frac{1}{k + \text{rank}_r(d)}$$
+    <div class="formula__caption">$k$ 通常取 60。只看排名，不看分数，避免了尺度不一致的问题</div>
+  </div>
+
+  <p>
+    RRF 的巧妙之处在于<strong>只用排名，不用分数</strong>。
+    这样就不需要归一化两个完全不同的分数分布，
+    而且对分数异常值天然鲁棒。
+  </p>
+
+  <h3>重排序：最后一道关卡</h3>
+
+  <p>
+    检索阶段追求<strong>快</strong>（要扫过几百万个向量），
+    所以用的是「双塔」结构：查询和文档分别编码，然后算相似度。
+    这种方式无法建模查询和文档之间的细粒度交互。
+  </p>
+
+  <p>
+    重排序（Rerank）阶段只处理检索出来的 Top-50，
+    可以用更强的<strong>交叉编码器</strong>（cross-encoder）：
+    把查询和文档拼在一起送进模型，输出一个相关性分数。
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 190" role="img" aria-label="双塔与交叉编码器的对比">
+      <!-- 双塔 -->
+      <text x="14" y="18" font-size="11.5" font-weight="700" fill="var(--brand)" font-family="sans-serif">双塔（检索用，快）</text>
+      <g font-family="sans-serif" font-size="10">
+        <rect x="14" y="30" width="70" height="30" rx="6" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="49" y="49" fill="var(--brand)" text-anchor="middle">查询</text>
+        <rect x="14" y="76" width="70" height="30" rx="6" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="49" y="95" fill="var(--brand)" text-anchor="middle">文档</text>
+        <rect x="106" y="30" width="56" height="30" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="134" y="49" fill="var(--ink-2)" text-anchor="middle" font-size="9.5">编码器</text>
+        <rect x="106" y="76" width="56" height="30" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="134" y="95" fill="var(--ink-2)" text-anchor="middle" font-size="9.5">编码器</text>
+        <circle cx="196" cy="68" r="12" fill="var(--accent-soft)" stroke="var(--accent)"></circle>
+        <text x="196" y="72" fill="var(--accent)" text-anchor="middle" font-size="13">×</text>
+      </g>
+      <text x="14" y="128" font-size="10" fill="var(--ink-3)" font-family="sans-serif">查询和文档分开编码，只算向量点积</text>
+      <text x="14" y="144" font-size="10" fill="var(--ok)" font-family="sans-serif">✓ 文档向量可以预先算好，检索极快</text>
+      <text x="14" y="160" font-size="10" fill="var(--danger)" font-family="sans-serif">✗ 无法建模查询与文档的细粒度交互</text>
+
+      <!-- 交叉编码器 -->
+      <text x="290" y="18" font-size="11.5" font-weight="700" fill="var(--violet)" font-family="sans-serif">交叉编码器（重排序用，准）</text>
+      <g font-family="sans-serif" font-size="10">
+        <rect x="290" y="30" width="70" height="30" rx="6" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="325" y="49" fill="var(--violet)" text-anchor="middle">查询</text>
+        <rect x="290" y="76" width="70" height="30" rx="6" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="325" y="95" fill="var(--violet)" text-anchor="middle">文档</text>
+        <rect x="376" y="53" width="80" height="30" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="416" y="72" fill="var(--ink-2)" text-anchor="middle" font-size="9.5">同一个编码器</text>
+        <text x="480" y="72" font-size="11" fill="var(--accent)" font-family="monospace">→ 0.87</text>
+      </g>
+      <text x="290" y="128" font-size="10" fill="var(--ink-3)" font-family="sans-serif">拼接后一起送入模型，充分交互</text>
+      <text x="290" y="144" font-size="10" fill="var(--ok)" font-family="sans-serif">✓ 准确率显著更高</text>
+      <text x="290" y="160" font-size="10" fill="var(--danger)" font-family="sans-serif">✗ 每对查询-文档都要跑一次，很慢</text>
+    </svg>
+    <div class="figure__caption">
+      <b>两阶段检索。</b>先用双塔从百万文档里粗筛出 50 条（快），
+      再用交叉编码器精排取前 5 条（准）。这是工业界 RAG 的标准架构。
+    </div>
+  </div>
+
+  <h2>17.6 生成阶段：怎么用好检索到的材料</h2>
+
+  <p>
+    检索做好了，生成阶段其实很简单。但有几个细节很关键：
+  </p>
+
+  <div class="codeblock" data-lang="text" data-title="RAG 的生成提示词模板">
+<script type="text/dlcode">
+你是一位严谨的知识助手。请严格基于下面提供的资料回答问题。
+
+# 规则
+1. 只使用资料中明确包含的信息，不要使用你自己的知识补充
+2. 每个事实性陈述后面必须标注来源编号，格式：[1] [2]
+3. 如果资料中没有足够的信息回答，直接说"根据现有资料无法回答"，
+   不要尝试推测
+4. 如果资料之间存在矛盾，指出矛盾并分别引用
+
+# 资料
+[1] 员工入职满一年可享受 5 天年假，申请需提前 3 天在系统提交。
+    来源：员工手册 2025 版 · 第 4.2 节
+
+[2] 当年未休完的年假可以累计到次年 3 月底前使用。
+    来源：员工手册 2025 版 · 第 4.3 节
+
+[3] 病假需要提供二级以上医院的证明，并抄送直属主管。
+    来源：员工手册 2025 版 · 第 4.5 节
+
+# 问题
+如何申请年假？可以攒到明年吗？
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>生成阶段的五个关键设计</div>
+    <p>
+      <strong>1. 强制引用编号。</strong>这不仅能让你验证答案，
+      还会显著降低幻觉——因为模型知道每个陈述都要有出处，
+      它会倾向于只使用资料里的内容。
+    </p>
+    <p>
+      <strong>2. 明确允许「不知道」。</strong>
+      「如果资料不足，说『无法回答』」这一条极其重要。
+      没有它，模型会硬答。
+    </p>
+    <p>
+      <strong>3. 要求处理矛盾。</strong>检索到的资料经常互相冲突
+      （旧版本和新版本的制度并存）。让模型指出矛盾比让它选一个更安全。
+    </p>
+    <p>
+      <strong>4. 在资料里带上来源信息。</strong>
+      不只是正文，还有文档名、章节、更新时间。
+      模型可以据此判断哪个更新、更权威。
+    </p>
+    <p>
+      <strong>5. 控制资料数量。</strong>不要把所有检索结果都塞进去。
+      5~10 条通常足够，多了反而因为「lost in the middle」而降低质量。
+    </p>
+  </div>
+
+  <h2>17.7 常见失败模式与诊断</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>症状</th><th>根因</th><th>怎么修</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>答案里有资料里没有的信息</td>
+          <td>模型在用自己的知识补充</td>
+          <td>强化提示词的约束；强制引用；降低 temperature</td>
+        </tr>
+        <tr>
+          <td>检索不到正确的文档</td>
+          <td>分块切断了关键信息；嵌入模型不适配领域</td>
+          <td>调整分块大小和重叠；加混合检索；换领域适配的嵌入模型</td>
+        </tr>
+        <tr>
+          <td>检索到了但不被使用</td>
+          <td>资料放在上下文中部被忽略；资料太长被截断</td>
+          <td>把最相关的放首尾；减少资料数量；加大 max_tokens</td>
+        </tr>
+        <tr>
+          <td>答案不完整</td>
+          <td>Top-K 太小，漏掉了相关块</td>
+          <td>增大检索数量 + 用重排序筛选；考虑「多跳检索」</td>
+        </tr>
+        <tr>
+          <td>把旧信息当新信息</td>
+          <td>没有时间维度的排序</td>
+          <td>元数据里带时间戳，检索时优先返回新版本</td>
+        </tr>
+        <tr>
+          <td>答非所问</td>
+          <td>查询本身模糊，或检索时用了原始查询</td>
+          <td>做「查询改写」：先让模型把问题重写成更适合检索的形式</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>查询改写：一个高性价比的优化</h3>
+
+  <p>
+    用户的提问方式和文档的表述方式往往不同。用户问「年假怎么请」，
+    文档写的是「年度带薪休假申请流程」。直接检索效果不好。
+  </p>
+
+  <p>几种改写策略：</p>
+
+  <ul>
+    <li><strong>HyDE：</strong>先让模型「假装回答」这个问题，
+    再用生成的假答案去检索。因为假答案的表述风格更接近真实文档。</li>
+    <li><strong>多查询：</strong>让模型生成 3~5 个不同角度的查询，分别检索后合并结果。</li>
+    <li><strong>问题分解：</strong>「年假怎么请、能攒吗」拆成两个独立查询分别检索。</li>
+    <li><strong>指代消解：</strong>多轮对话中，「它呢？」需要结合历史补全成完整查询。</li>
+  </ul>
+
+  <h2>17.8 怎么评估 RAG</h2>
+
+  <p>
+    RAG 有两个环节，必须<strong>分开评估</strong>，否则你无法定位问题。
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">检索质量</div>
+      <p class="card__body">
+        <strong>Recall@K：</strong>正确的文档块有没有出现在 Top-K 里？<br>
+        <strong>MRR：</strong>正确块的排名平均有多靠前？<br>
+        <strong>Precision@K：</strong>Top-K 里有多少是真正相关的？
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">生成质量</div>
+      <p class="card__body">
+        <strong>忠实度（Faithfulness）：</strong>答案是否完全基于检索到的资料？<br>
+        <strong>相关性：</strong>答案是否回答了问题？<br>
+        <strong>引用准确性：</strong>标注的来源是否正确对应？
+      </p>
+    </div>
+  </div>
+
+  <p>
+    <strong>先修检索，再修生成。</strong>
+    如果 Recall@5 只有 60%，说明 40% 的问题根本没找到正确的资料，
+    这时候无论怎么优化提示词都没用。
+  </p>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>搭建 RAG 评测集的最快方法</div>
+    <p>
+      不需要人工标注几百条。一个实用的做法是：
+    </p>
+    <p>
+      <strong>① 从你的文档里随机抽 50 个块</strong>，
+      让一个强模型为每个块生成 2~3 个「这个块能回答的问题」。
+      <br>
+      <strong>② 用这些问题跑检索</strong>，看对应的块能不能被召回。
+      这就是 Recall 指标。
+      <br>
+      <strong>③ 再跑完整 RAG</strong>，用另一个模型判断答案是否忠实于检索到的资料。
+    </p>
+    <p>
+      这套流程半天就能搭起来，能覆盖 80% 的常见问题。
+      比「凭感觉调提示词」高效得多。
+    </p>
+  </div>
+
+  <h2>17.9 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">RAG</div>
+      <div class="gloss__def">检索增强生成。先从知识库检索相关内容，再让模型基于这些内容回答。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">分块 <small>chunking</small></div>
+      <div class="gloss__def">把文档切成检索单元。块大小、重叠、上下文头都会显著影响效果。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">嵌入 <small>embedding</small></div>
+      <div class="gloss__def">把文本映射成高维向量，语义相近则向量相近。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">混合检索</div>
+      <div class="gloss__def">向量检索 + 关键词检索（BM25），用 RRF 融合。兼顾语义与精确匹配。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">重排序 <small>rerank</small></div>
+      <div class="gloss__def">用交叉编码器对 Top-K 精排。准确率高但慢，所以只用在最后一步。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">忠实度 <small>faithfulness</small></div>
+      <div class="gloss__def">答案是否完全基于检索到的资料，没有引入外部信息。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>RAG 的本质是「开卷考试」：不要求模型记住知识，只要求它会查资料。</li>
+    <li>分块是最容易被忽视也最影响效果的环节。块大小、重叠、上下文头都很关键。</li>
+    <li>纯向量检索有三个盲区：精确匹配差、对否定不敏感、语义相近不等于能回答。</li>
+    <li>工业界的标准架构是「混合检索（快）+ 重排序（准）」两阶段。</li>
+    <li>生成阶段要强制引用、允许说不知道、处理资料矛盾。</li>
+    <li><strong>90% 的 RAG 问题出在检索。先修检索，再修生成。</strong></li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么说「90% 的 RAG 问题出在检索」？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为生成阶段的上限<strong>完全由检索质量决定</strong>。
+        </p>
+        <p>
+          如果正确的资料没有被检索出来，无论提示词写得多好、模型多强，
+          它都不可能给出正确答案——巧妇难为无米之炊。
+          反过来，如果检索出了正确的资料，即使是一个中等水平的模型，
+          配合一个好的提示词也能给出不错的答案。
+        </p>
+        <p>
+          实践中的表现就是：很多人遇到 RAG 效果差，
+          第一反应是改提示词、换更大的模型，结果提升有限。
+          正确的做法是先测 <strong>Recall@K</strong>——
+          如果它低于 80%，说明问题在检索，应该去调分块策略、加混合检索、换嵌入模型。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么需要重排序？只用向量检索不行吗？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为检索和排序的目标不同：<strong>检索要快，排序要准。</strong>
+        </p>
+        <p>
+          向量检索用的是「双塔」结构：查询和文档分别编码成向量，然后算相似度。
+          这样文档向量可以预先算好并建立索引，检索百万文档只要几十毫秒。
+          但代价是——<strong>查询和文档之间没有任何交互</strong>，
+          只是两个独立向量的点积，无法捕捉细粒度的语义关系。
+        </p>
+        <p>
+          交叉编码器把查询和文档<strong>拼在一起</strong>送入模型，
+          每个词都能和对方的每个词交互，准确率显著更高。
+          但它必须对每一对查询-文档都跑一次，百万文档要跑百万次，完全不可行。
+        </p>
+        <p>
+          所以两阶段架构是必然的：双塔从百万里粗筛出 50 条（快），
+          交叉编码器从 50 条里精排出 5 条（准）。
+          这就是「召回 + 精排」的经典模式。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>分块时为什么要在块的开头加上文档标题和章节名？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为<strong>孤立的块会丢失上下文</strong>。
+        </p>
+        <p>
+          假设一个块的内容是「申请需提前 3 天在系统提交」。
+          单独看，这个块说的是什么？请假？报销？采购？
+          嵌入模型无法判断，它生成的向量会很模糊，
+          检索时可能匹配到任何「提前提交」相关的查询。
+        </p>
+        <p>
+          如果改成「员工手册 2025 版 · 4.2 节 年假申请：申请需提前 3 天在系统提交」，
+          向量的语义就明确了——它明确属于「年假」这个主题。
+        </p>
+        <p>
+          这个技巧叫「上下文头」（contextual header），
+          是成本最低、收益最明显的 RAG 优化之一。
+          它不需要换模型、不需要重新索引，只是改一下文本预处理。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>RAG 和微调该怎么选？能一起用吗？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>判断标准：知识 vs 行为。</strong>
+          需要改变模型「知道什么」用 RAG，
+          需要改变模型「怎么做」用微调。
+        </p>
+        <p>
+          <strong>能一起用，而且效果往往最好。</strong>典型的分工是：
+        </p>
+        <p>
+          · <strong>RAG</strong> 负责提供准确、可更新、可引用的事实知识。
+          <br>
+          · <strong>微调</strong> 负责让模型学会你期望的输出风格、格式、术语和推理方式。
+        </p>
+        <p>
+          举例：一个医疗问答系统，用 RAG 提供最新的临床指南，
+          用微调让模型学会用医生的口吻、按「诊断-依据-建议」的格式输出，
+          并且知道什么情况下必须建议就医。
+        </p>
+        <p>
+          <strong>顺序建议：先做 RAG，再做微调。</strong>
+          因为 RAG 的迭代周期是天级的，微调是周级的。
+          先用 RAG 把效果拉到可用，再考虑微调做精细化。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>如果模型回答里出现了资料中没有的信息，你会怎么排查？</summary>
+      <div class="quiz__answer">
+        <p>
+          按这个顺序排查：
+        </p>
+        <p>
+          <strong>① 先看检索结果。</strong>把实际送进提示词的资料打印出来。
+          很可能正确的资料根本没被检索到，模型只能用自己的知识硬答。
+          这是最常见的原因。
+        </p>
+        <p>
+          <strong>② 看提示词约束。</strong>有没有明确说「只使用资料中的信息」？
+          有没有要求「资料不足时说明无法回答」？
+          缺少这两条约束时，模型会很自然地用自己的知识补充。
+        </p>
+        <p>
+          <strong>③ 看 temperature。</strong>温度太高会增加模型自由发挥的概率。
+          知识问答场景建议 0~0.3。
+        </p>
+        <p>
+          <strong>④ 看引用标注。</strong>如果要求强制标注 [1][2]，
+          但没有出处的陈述还是出现了，说明提示词的约束力度不够，
+          可以考虑用结构化输出（要求每条陈述都必须带 citation 字段）。
+        </p>
+        <p>
+          <strong>⑤ 加自动检查。</strong>用一个独立的模型（或规则）
+          检查答案里的每个事实性陈述是否能在资料中找到依据，
+          不通过的重新生成或标注警告。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    RAG 让模型能「查资料」，但它还只能「说」。如果模型能「做」呢？
+  </p>
+
+  <p>
+    查数据库、发邮件、调 API、执行代码、操作浏览器——
+    当模型能调用工具时，它就从「对话系统」变成了「<strong>能完成任务的系统</strong>」。
+  </p>
+
+  <p>
+    下一章讲 Agent：工具调用的原理（其实只是结构化输出）、
+    ReAct 循环、记忆管理、任务规划，
+    以及为什么<strong>「让模型自己循环」是 Agent 设计里最危险的想法</strong>。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

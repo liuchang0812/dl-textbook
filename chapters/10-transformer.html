@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 10 章 · Transformer 解剖 — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="10">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 10 章 · 第四部 注意力革命</span>
+    <h1>Transformer 解剖</h1>
+    <p class="chapter-head__lead">
+      2017 年的《Attention Is All You Need》提出了 Transformer，
+      然后一切都变了。这一章我们把它拆成零件逐个检查：
+      残差、归一化、前馈网络、编码器、解码器。
+      拆完之后，你会发现它其实是一个出奇简洁的架构。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 34 分钟</span>
+      <span>🎯 能默写出一个完整的 Transformer 块</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>10.1 全景图</h2>
+
+  <p>
+    先把整体结构看清楚。原始 Transformer 是「编码器-解码器」结构，
+    左边编码输入，右边解码输出：
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 560 470" role="img" aria-label="Transformer 完整架构图">
+      <defs>
+        <marker id="arT" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--line-2)"></path>
+        </marker>
+      </defs>
+
+      <!-- 左：编码器 -->
+      <text x="140" y="20" font-size="12.5" font-weight="700" fill="var(--brand)" text-anchor="middle" font-family="sans-serif">编码器 × N</text>
+      <rect x="46" y="32" width="188" height="330" rx="12" fill="none" stroke="var(--brand-line)" stroke-width="1.6" stroke-dasharray="6 5"></rect>
+
+      <rect x="66" y="52" width="148" height="42" rx="8" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+      <text x="140" y="70" font-size="11.5" fill="var(--brand)" text-anchor="middle" font-family="sans-serif">多头自注意力</text>
+      <text x="140" y="85" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">每个词关注所有词</text>
+
+      <rect x="66" y="110" width="148" height="34" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="140" y="131" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">Add &amp; LayerNorm</text>
+
+      <rect x="66" y="160" width="148" height="42" rx="8" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+      <text x="140" y="178" font-size="11.5" fill="var(--brand)" text-anchor="middle" font-family="sans-serif">前馈网络 FFN</text>
+      <text x="140" y="193" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">逐位置独立</text>
+
+      <rect x="66" y="218" width="148" height="34" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="140" y="239" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">Add &amp; LayerNorm</text>
+
+      <rect x="66" y="272" width="148" height="34" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="140" y="293" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">位置编码（相加）</text>
+
+      <rect x="66" y="322" width="148" height="30" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="140" y="341" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">词嵌入</text>
+
+      <!-- 右：解码器 -->
+      <text x="420" y="20" font-size="12.5" font-weight="700" fill="var(--violet)" text-anchor="middle" font-family="sans-serif">解码器 × N</text>
+      <rect x="326" y="32" width="188" height="330" rx="12" fill="none" stroke="var(--violet)" stroke-width="1.6" stroke-dasharray="6 5" opacity=".55"></rect>
+
+      <rect x="346" y="52" width="148" height="42" rx="8" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+      <text x="420" y="70" font-size="11.5" fill="var(--violet)" text-anchor="middle" font-family="sans-serif">掩码多头自注意力</text>
+      <text x="420" y="85" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">只能看左边</text>
+
+      <rect x="346" y="110" width="148" height="34" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="420" y="131" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">Add &amp; LayerNorm</text>
+
+      <rect x="346" y="160" width="148" height="42" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="420" y="178" font-size="11.5" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">交叉注意力</text>
+      <text x="420" y="193" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">Q 来自解码器</text>
+
+      <rect x="346" y="218" width="148" height="34" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="420" y="239" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">Add &amp; LayerNorm</text>
+
+      <rect x="346" y="272" width="148" height="34" rx="8" fill="var(--violet-soft)" stroke="var(--violet)" opacity=".8"></rect>
+      <text x="420" y="293" font-size="11" fill="var(--violet)" text-anchor="middle" font-family="sans-serif">前馈网络 FFN</text>
+
+      <rect x="346" y="322" width="148" height="30" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="420" y="341" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">Add &amp; LayerNorm</text>
+
+      <!-- 编码器到解码器的箭头 -->
+      <path d="M234,73 L346,181" stroke="var(--accent)" stroke-width="2.2" fill="none" marker-end="url(#arT)" stroke-dasharray="7 5"></path>
+      <text x="286" y="118" font-size="10.5" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">K, V</text>
+
+      <!-- 底部输出 -->
+      <rect x="346" y="376" width="148" height="32" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="420" y="396" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">线性层 + Softmax</text>
+      <path d="M420,356 L420,374" stroke="var(--line-2)" stroke-width="1.6" fill="none" marker-end="url(#arT)"></path>
+      <text x="420" y="430" font-size="11" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">输出概率分布</text>
+
+      <!-- 底部输入 -->
+      <path d="M140,390 L140,354" stroke="var(--line-2)" stroke-width="1.6" fill="none" marker-end="url(#arT)"></path>
+      <text x="140" y="410" font-size="11" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">输入序列</text>
+      <path d="M420,432 L420,410" stroke="var(--line-2)" stroke-width="1.6" fill="none" marker-end="url(#arT)"></path>
+      <text x="500" y="420" font-size="11" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">← 已生成的词</text>
+    </svg>
+    <div class="figure__caption">
+      <b>Transformer 全景。</b>左边编码器理解输入，右边解码器生成输出。
+      两者都由若干相同的层堆叠而成（原论文 $N=6$）。
+      注意那个从编码器指向解码器的箭头——那是交叉注意力，也是编码器信息唯一的出口。
+    </div>
+  </div>
+
+  <p>
+    这张图看起来复杂，但其实只有 <strong>5 个基本零件</strong>：
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">① 多头注意力</div>
+      <p class="card__body">负责让不同位置交换信息。第 9 章已经讲透了。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">② 前馈网络 FFN</div>
+      <p class="card__body">两个线性层 + 激活函数，逐位置独立作用。承担了大部分参数量。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">③ 残差连接</div>
+      <p class="card__body">$\mathbf{y} = \mathbf{x} + \text{Sublayer}(\mathbf{x})$，给梯度开高速公路。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">④ 层归一化</div>
+      <p class="card__body">稳定每层的输入分布。现代大模型都用 Pre-Norm + RMSNorm。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">⑤ 位置编码</div>
+      <p class="card__body">注入顺序信息，因为注意力本身不知道谁在前谁在后。</p>
+    </div>
+  </div>
+
+  <h2>10.2 输入端：从文字到向量</h2>
+
+  <p>输入的处理分三步：</p>
+
+  <ol class="steps">
+    <li>
+      <strong>分词（Tokenization）</strong>
+      <p>把文本切成 token。「今天天气真好」可能切成 <code>今天 / 天气 / 真好</code>。
+      第 11 章会详细讲。</p>
+    </li>
+    <li>
+      <strong>词嵌入（Embedding）</strong>
+      <p>每个 token 的 ID 查一张表，得到一个 $d_{model}$ 维的向量。
+      这张表本身是可学习的，形状是 $(V \times d_{model})$，$V$ 是词表大小。</p>
+    </li>
+    <li>
+      <strong>加位置编码</strong>
+      <p>把位置编码<strong>加</strong>（不是拼接）到词向量上。
+      这样每个位置就携带了「我是第几个词」的信息。</p>
+    </li>
+  </ol>
+
+  <div class="formula">
+    $$\mathbf{H}^{(0)} = \text{Embed}(\text{tokens}) \cdot \sqrt{d_{model}} + \text{PosEnc}$$
+    <div class="formula__caption">乘 $\sqrt{d_{model}}$ 是原论文的做法，让嵌入的尺度和位置编码匹配</div>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>为什么是「加」而不是「拼接」？</div>
+    <p>
+      拼接的话维度会翻倍，参数量和计算量都要涨。而加法在数学上已经足够：
+      因为嵌入是高维空间里的一个点，位置编码是另一个点，
+      两者相加得到的还是一个点，网络完全可以从这个「合成点」里
+      同时读出语义和位置信息。
+    </p>
+    <p>
+      直觉类比：RGB 颜色是三个数相加混合的，但你依然能分辨出「偏红」和「偏蓝」。
+      高维空间能容纳的信息比我们直觉想象的要多得多。
+    </p>
+  </div>
+
+  <h2>10.3 编码器块：理解输入</h2>
+
+  <p>一个编码器层就是两个子层，每个子层都包着「残差 + 归一化」：</p>
+
+  <div class="formula">
+    $$\begin{aligned}
+    \mathbf{H}' &= \mathbf{H} + \text{MultiHeadSelfAttention}(\text{LN}(\mathbf{H}))\\
+    \mathbf{H}'' &= \mathbf{H}' + \text{FFN}(\text{LN}(\mathbf{H}'))
+    \end{aligned}$$
+    <div class="formula__caption">这是 Pre-Norm 写法，也是现代大模型的标准做法</div>
+  </div>
+
+  <p>两个子层的分工非常清晰：</p>
+
+  <ul>
+    <li><strong>注意力层负责「通信」</strong>：让每个位置从其他位置收集相关信息。
+      这是序列内部唯一的交互通道。</li>
+    <li><strong>FFN 负责「计算」</strong>：对每个位置独立地做非线性变换，
+      把收集来的信息加工成更有用的表示。</li>
+  </ul>
+
+  <div class="keyidea">
+    <div class="keyidea__label">一个极简的心智模型</div>
+    <p>
+      把 Transformer 层想象成一个团队开会：<br>
+      · <strong>注意力</strong> = 每个人发言 + 听别人说话（信息交换）<br>
+      · <strong>FFN</strong> = 每个人自己独立思考、整理笔记（信息加工）<br>
+      · <strong>残差</strong> = 保留原有的想法，不要因为听了别人的就忘掉自己<br>
+      · <strong>归一化</strong> = 主持人控制节奏，别让声音忽大忽小
+    </p>
+    <p>
+      这个「交换 → 加工 → 交换 → 加工」的循环重复 $N$ 次，
+      就形成了从浅层语法到深层语义的抽象层次。
+    </p>
+  </div>
+
+  <h2>10.4 解码器块：生成输出</h2>
+
+  <p>解码器比编码器多一个子层，一共三个：</p>
+
+  <div class="formula">
+    $$\begin{aligned}
+    \mathbf{H} &= \mathbf{H} + \text{MaskedSelfAttn}(\text{LN}(\mathbf{H}))\\
+    \mathbf{H} &= \mathbf{H} + \text{CrossAttn}(\underbrace{\text{LN}(\mathbf{H})}_{Q},\ \underbrace{\mathbf{H}_{enc}}_{K,V})\\
+    \mathbf{H} &= \mathbf{H} + \text{FFN}(\text{LN}(\mathbf{H}))
+    \end{aligned}$$
+  </div>
+
+  <h3>① 掩码自注意力</h3>
+
+  <p>
+    和编码器的自注意力一样，但加上了因果掩码——每个位置只能看到自己和左边。
+    这是因为解码器是<strong>自回归</strong>的：生成第 5 个词时，第 6 个词还不存在。
+  </p>
+
+  <h3>② 交叉注意力：编码器信息的唯一入口</h3>
+
+  <p>
+    这是整个架构里最关键的一步。注意 Q、K、V 的来源：
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th>Query 来自</th><th>Key / Value 来自</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>自注意力</td><td>解码器</td><td>解码器</td><td>我该关注已生成内容的哪里</td></tr>
+        <tr><td><strong>交叉注意力</strong></td><td><strong>解码器</strong></td><td><strong>编码器</strong></td><td>我该关注输入句子的哪里</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    「Query 来自解码器，Key 和 Value 来自编码器」这个设计非常符合直觉：
+    <strong>解码器是「提问方」，编码器是「回答方」</strong>。
+    每生成一个词，解码器都问一次「输入句子里哪部分和我要写的这个词相关」。
+  </p>
+
+  <p>
+    这正是第 8 章那个「注意力解决 seq2seq 瓶颈」的方案——
+    只是现在它不再是一个补丁，而是架构的核心。
+  </p>
+
+  <h2>10.5 FFN：被低估的主角</h2>
+
+  <p>
+    大多数讲 Transformer 的材料都把注意力讲得很详细，然后一笔带过 FFN。
+    但这其实是个很大的遗漏，因为<strong>FFN 占了大约三分之二的参数量</strong>。
+  </p>
+
+  <div class="formula">
+    $$\text{FFN}(\mathbf{x}) = \mathbf{W}_2 \cdot \text{GELU}(\mathbf{W}_1\mathbf{x} + \mathbf{b}_1) + \mathbf{b}_2$$
+    <div class="formula__caption">
+      $\mathbf{W}_1$ 形状 $(d_{model} \times d_{ff})$，$\mathbf{W}_2$ 形状 $(d_{ff} \times d_{model})$，
+      通常 $d_{ff} = 4d_{model}$
+    </div>
+  </div>
+
+  <p>
+    它做的事情是「先升维，再降维」：把 512 维升到 2048 维，
+    在更高维的空间里做非线性变换，再压回 512 维。
+  </p>
+
+  <h3>FFN 到底在学什么？</h3>
+
+  <p>
+    近年来的可解释性研究发现，FFN 的行为很像一个<strong>键值记忆库</strong>：
+  </p>
+
+  <ul>
+    <li>第一层的每一列（$\mathbf{W}_1$ 的某个神经元）像一个「模式检测器」，
+      对某种输入模式（比如「这是一个地名」）产生高激活。</li>
+    <li>第二层对应的行则像「对应的输出」，把这个检测结果转换成要写入的信息。</li>
+  </ul>
+
+  <p>
+    换句话说，<strong>注意力负责在序列里搬运信息，FFN 负责存储和调用事实知识。</strong>
+    这也是为什么用 LoRA 微调时，通常把适配器加在 FFN 上效果最好——
+    因为你是在往模型里写入新知识。
+  </p>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>现代 FFN 的两种改进</div>
+    <p>
+      <strong>SwiGLU：</strong>用门控机制替换单个激活函数，现在是大模型标配：
+    </p>
+    <p style="text-align:center;margin:.6rem 0">
+      $\text{FFN}(x) = (\text{SiLU}(x\mathbf{W}_1) \odot x\mathbf{W}_3)\mathbf{W}_2$
+    </p>
+    <p>
+      它多了一个 $\mathbf{W}_3$，所以为了保持参数量不变，
+      会把 $d_{ff}$ 从 $4d$ 缩小到约 $8d/3$。LLaMA、Qwen、Gemma 都用了这个结构。
+    </p>
+    <p style="margin-top:.6rem">
+      <strong>MoE（混合专家）：</strong>把一个大 FFN 拆成几十上百个「专家」，
+      每次只激活其中 2 个。这样总参数量可以很大（知识多），
+      但每次推理只用到一小部分（算力省）。第 21 章会详细讲。
+    </p>
+  </div>
+
+  <h2>10.6 参数量都花在哪了</h2>
+
+  <p>
+    用下面这个计算器自己调一调，看看参数量是怎么分布的。
+    你会发现注意力只占约三分之一，剩下的大部分在 FFN 和词嵌入上：
+  </p>
+
+  <div class="widget" data-widget="params">
+    <div class="widget__head"><span class="tag">交互 12</span>Transformer 参数量计算器</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">模型维度 d_model</span><span class="ctrl__val" data-v="d">768</span></div>
+            <input type="range" data-p="d" min="256" max="12288" step="128" value="768">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">层数 N</span><span class="ctrl__val" data-v="L">12</span></div>
+            <input type="range" data-p="L" min="1" max="96" step="1" value="12">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">词表大小 V</span><span class="ctrl__val" data-v="V">50,257</span></div>
+            <input type="range" data-p="V" min="10000" max="200000" step="1000" value="50257">
+          </div>
+          <div class="btnrow">
+            <button class="btn" data-preset="gpt2s">GPT-2 Small</button>
+            <button class="btn" data-preset="gpt2l">GPT-2 Large</button>
+            <button class="btn" data-preset="gpt3">GPT-3</button>
+            <button class="btn" data-preset="llama7">LLaMA-7B</button>
+            <button class="btn" data-preset="llama70">LLaMA-70B</button>
+          </div>
+        </div>
+        <div>
+          <div class="bars" data-role="bars" style="margin-bottom:.9rem"></div>
+          <div class="readout" data-role="info"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        试试把 d_model 从 768 拖到 12288：参数量涨了约 <strong>256 倍</strong>
+        （因为参数量正比于 $d^2$）。这就是为什么「把模型做大」这件事如此昂贵——
+        规模是平方级增长的，而性能提升是对数级的。
+      </p>
+    </div>
+  </div>
+
+  <div class="note note--math">
+    <div class="note__title"><span class="ico">∑</span>记住这个估算公式</div>
+    <p>$$\text{参数量} \approx \underbrace{12 \cdot N \cdot d_{model}^2}_{\text{Transformer 层}} + \underbrace{V \cdot d_{model}}_{\text{词嵌入}}$$</p>
+    <p>
+      这个公式非常好用。用它估算 GPT-3（$N=96$，$d=12288$，$V=50257$）：
+      $12 \times 96 \times 12288^2 = 1.74 \times 10^{11}$，加上嵌入约 $6\times10^8$，
+      总共约 1750 亿——和官方数字完全一致。
+    </p>
+  </div>
+
+  <h2>10.7 三种架构变体</h2>
+
+  <p>
+    原始 Transformer 是「编码器 + 解码器」。但很快人们发现，
+    只用其中一半往往就够了，而且效果更好。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>类型</th><th>结构</th><th>代表模型</th><th>擅长</th><th>注意力</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Encoder-only</strong></td>
+          <td>只有编码器</td>
+          <td>BERT、RoBERTa、DeBERTa</td>
+          <td>理解：分类、抽取、检索、嵌入</td>
+          <td>双向</td>
+        </tr>
+        <tr>
+          <td><strong>Decoder-only</strong></td>
+          <td>只有解码器</td>
+          <td><strong>GPT、LLaMA、Qwen、Claude</strong></td>
+          <td>生成：对话、写作、代码</td>
+          <td>因果（单向）</td>
+        </tr>
+        <tr>
+          <td><strong>Encoder-Decoder</strong></td>
+          <td>两者都有</td>
+          <td>T5、BART、原始 Transformer</td>
+          <td>转换：翻译、摘要</td>
+          <td>编码双向 + 解码单向</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>为什么 Decoder-only 赢了？</h3>
+
+  <p>
+    2020 年之后，几乎所有的前沿大模型都是 Decoder-only。这不是偶然，有四个原因：
+  </p>
+
+  <ol>
+    <li>
+      <strong>训练目标最简单。</strong>只需要「预测下一个词」这一个任务，
+      任何文本都能用，不需要构造特殊的训练样本。
+    </li>
+    <li>
+      <strong>和推理过程完全一致。</strong>训练时看前 $n$ 个词预测第 $n+1$ 个，
+      推理时也是同样的事。没有「训练-推理不一致」的问题。
+    </li>
+    <li>
+      <strong>天然支持生成。</strong>编码器模型不能直接生成文本，
+      而对话、写作、代码这些最赚钱的应用全都是生成任务。
+    </li>
+    <li>
+      <strong>少样本学习能力强。</strong>GPT-3 的论文发现，
+      只要把任务写成「上文」，Decoder-only 模型就能在没有微调的情况下完成任务。
+    </li>
+  </ol>
+
+  <div class="keyidea">
+    <div class="keyidea__label">一个统一视角</div>
+    <p>
+      Decoder-only 的胜利本质上是<strong>「统一」的胜利</strong>：
+      所有任务——翻译、摘要、问答、写代码、数学推理——
+      都被重新表述为「给定一段文本，续写下去」。
+    </p>
+    <p>
+      这种统一带来的是<strong>规模效应</strong>：不需要为每个任务设计不同的架构，
+      只需要一个模型 + 海量数据 + 更多算力。
+      这也正是「基础模型」（foundation model）这个词的含义。
+    </p>
+  </div>
+
+  <h2>10.8 完整的 Transformer 块</h2>
+
+  <p>把这一章的东西写成代码，一个完整的 Decoder-only Transformer 大概长这样：</p>
+
+  <div class="codeblock" data-lang="python" data-title="transformer_block.py — 一个完整的 Transformer 块">
+<script type="text/dlcode">
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.0):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.n_heads, self.d_k = n_heads, d_model // n_heads
+        # 一次性算出 Q、K、V（比三个独立线性层更快）
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, causal=True):
+        B, T, C = x.shape                       # batch, 序列长度, d_model
+
+        # (B, T, 3C) -> (3, B, n_heads, T, d_k)
+        qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.d_k)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # 缩放点积注意力（PyTorch 2.0+ 会派发到 FlashAttention 内核）
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=causal,
+        )
+        out = out.transpose(1, 2).reshape(B, T, C)
+        return self.out_proj(out)
+
+class FeedForward(nn.Module):
+    """SwiGLU 变体：门控 + 升维 + 降维"""
+    def __init__(self, d_model, dropout=0.0, mult=8/3):
+        super().__init__()
+        hidden = int(mult * d_model)            # 用 8/3 而不是 4，为了对齐参数量
+        hidden = 64 * ((hidden + 63) // 64)     # 对齐到 64 的倍数，对硬件友好
+        self.w1 = nn.Linear(d_model, hidden, bias=False)
+        self.w3 = nn.Linear(d_model, hidden, bias=False)   # 门控分支
+        self.w2 = nn.Linear(hidden, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+
+class Block(nn.Module):
+    """一个完整的 Transformer 块（Pre-Norm 结构）"""
+    def __init__(self, d_model, n_heads, dropout=0.0):
+        super().__init__()
+        self.ln1 = nn.RMSNorm(d_model)
+        self.attn = MultiHeadAttention(d_model, n_heads, dropout)
+        self.ln2 = nn.RMSNorm(d_model)
+        self.ffn = FeedForward(d_model, dropout)
+
+    def forward(self, x):
+        # 注意：Pre-Norm。归一化在子层之前，残差路径保持"干净"
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class MiniGPT(nn.Module):
+    def __init__(self, vocab_size, d_model=768, n_layers=12, n_heads=12, max_len=1024):
+        super().__init__()
+        self.tok_emb = nn.Embedding(vocab_size, d_model)
+        self.pos_emb = nn.Embedding(max_len, d_model)
+        self.blocks = nn.ModuleList([Block(d_model, n_heads) for _ in range(n_layers)])
+        self.ln_f = nn.RMSNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size, bias=False)
+        self.head.weight = self.tok_emb.weight      # 权重共享，省 V×d 个参数
+        self.apply(self._init)
+        # 残差累加会让方差随深度增长，按 1/sqrt(2N) 缩放输出投影
+        for name, p in self.named_parameters():
+            if name.endswith('out_proj.weight') or name.endswith('w2.weight'):
+                nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * n_layers))
+
+    @staticmethod
+    def _init(m):
+        if isinstance(m, nn.Linear):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
+        elif isinstance(m, nn.Embedding):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        pos = torch.arange(T, device=idx.device)
+        x = self.tok_emb(idx) + self.pos_emb(pos)     # (B, T, C)
+        for block in self.blocks:
+            x = block(x)
+        x = self.ln_f(x)
+        logits = self.head(x)                          # (B, T, vocab)
+
+        if targets is None:
+            return logits, None
+        # 交叉熵：预测下一个词
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            targets.view(-1),
+            ignore_index=-1,
+        )
+        return logits, loss
+
+# 建一个 GPT-2 Small 规模的模型
+model = MiniGPT(vocab_size=50257, d_model=768, n_layers=12, n_heads=12)
+n = sum(p.numel() for p in model.parameters())
+print(f"参数量: {n:,}")     # 约 124,000,000
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>这段代码里值得注意的四个细节</div>
+    <p>
+      <strong>1. QKV 合并成一次矩阵乘法。</strong>三个独立线性层要读三次输入、
+      启动三次 CUDA kernel。合并成一次 <code>(B,T,3C)</code> 的乘法能快不少。
+      这是所有高效实现的通用做法。
+    </p>
+    <p>
+      <strong>2. 权重共享（weight tying）。</strong>
+      输出层的权重直接指向词嵌入。理由是「输入时把词变成向量」和
+      「输出时把向量变成词」本来就是互逆的操作。这一下省了 $V\times d$ 个参数
+      （GPT-2 规模下是 3800 万，占总量 30%）。
+    </p>
+    <p>
+      <strong>3. 残差分支的缩放初始化。</strong>
+      因为残差是累加的，$N$ 层之后输出的方差会放大 $N$ 倍。
+      把负责写回残差路径的层（<code>out_proj</code>、<code>w2</code>）
+      的初始化标准差除以 $\sqrt{2N}$，能让训练一开始就稳定。
+      GPT-2 论文里的关键技巧。
+    </p>
+    <p>
+      <strong>4. <code>is_causal=True</code>。</strong>
+      不用手动构造掩码矩阵了，PyTorch 会派发到 FlashAttention 内核，
+      又快又省显存。这是 2023 年之后的标准写法。
+    </p>
+  </div>
+
+  <h2>10.9 为什么 Transformer 能赢</h2>
+
+  <p>回到最根本的问题：为什么是它？</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>能力</th><th>RNN</th><th>CNN</th><th>Transformer</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>任意两位置的距离</td>
+          <td>$O(n)$ 步</td>
+          <td>$O(\log n)$ 层</td>
+          <td><strong>$O(1)$</strong></td>
+        </tr>
+        <tr>
+          <td>训练并行度</td>
+          <td>❌ 必须按时间串行</td>
+          <td>✅ 全并行</td>
+          <td>✅ 全并行</td>
+        </tr>
+        <tr>
+          <td>单步复杂度</td>
+          <td>$O(n)$</td>
+          <td>$O(n \log n)$</td>
+          <td>$O(n^2)$</td>
+        </tr>
+        <tr>
+          <td>结构先验</td>
+          <td>顺序假设</td>
+          <td>局部性 + 平移不变</td>
+          <td><strong>几乎没有</strong></td>
+        </tr>
+        <tr>
+          <td>数据需求</td>
+          <td>少</td>
+          <td>中等</td>
+          <td>极多</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    注意最后两行。Transformer 的「缺点」恰恰是它的优点：
+    <strong>它几乎没有结构先验</strong>，所以它不受任何假设的限制，
+    可以自由地学习数据里的任何模式。
+  </p>
+
+  <p>
+    代价是它需要<strong>极其海量的数据</strong>才能学好。而在互联网时代，
+    文本数据是近乎无限的。于是这个「缺点」在现实中根本不存在，
+    而「自由」带来的上限提升却是无限的。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">Transformer 真正的历史意义</div>
+    <p>
+      它不是「更好的序列模型」，而是<strong>第一个通用到可以吃下任何模态数据的架构</strong>。
+    </p>
+    <p>
+      文本是 token 序列，图像是 patch 序列（ViT），语音是帧序列，
+      蛋白质是氨基酸序列，代码是字符序列……
+      只要能把数据变成序列，Transformer 就能处理。
+    </p>
+    <p>
+      这就是为什么 2020 年之后，整个 AI 领域的所有分支都收敛到了同一个架构上。
+      这种「统一」在科学史上极为罕见，也是「基础模型」概念能够成立的技术前提。
+    </p>
+  </div>
+
+  <h2>10.10 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">Transformer</div>
+      <div class="gloss__def">完全基于注意力构建的序列模型，不含任何循环或卷积结构。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">前馈网络 <small>FFN</small></div>
+      <div class="gloss__def">逐位置的两层 MLP，先升维到 $4d$ 再降回 $d$。占约 2/3 参数量，存事实知识。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">交叉注意力 <small>cross-attention</small></div>
+      <div class="gloss__def">Query 来自解码器，Key/Value 来自编码器。解码器信息获取的唯一入口。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">Pre-Norm</div>
+      <div class="gloss__def">归一化放在子层之前，让残差路径保持干净。深层模型能训起来的关键。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">权重共享 <small>weight tying</small></div>
+      <div class="gloss__def">输入嵌入和输出投影用同一份权重，省下 $V\times d$ 个参数。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">Decoder-only</div>
+      <div class="gloss__def">只保留解码器的架构，现代大模型的主流选择。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>Transformer 只有 5 个零件：注意力、FFN、残差、归一化、位置编码。</li>
+    <li>注意力负责<strong>通信</strong>，FFN 负责<strong>计算</strong>，两者交替堆叠形成抽象层次。</li>
+    <li>交叉注意力是解码器获取编码器信息的唯一通道：Q 来自解码器，K/V 来自编码器。</li>
+    <li>参数量估算：$12Nd^2 + Vd$。FFN 占约 2/3。</li>
+    <li>三种变体中 Decoder-only 胜出，因为它最简单、最统一、最适合生成。</li>
+    <li>Transformer 的核心优势是<strong>没有结构先验</strong>——这让它成为通用架构，但需要海量数据。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么注意力层和 FFN 必须交替出现，不能只堆注意力？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为它们的分工完全不同。
+        </p>
+        <p>
+          <strong>注意力是「通信」</strong>：它是一个加权平均操作，
+          本质上是对已有信息做<em>线性组合</em>（softmax 权重 × Value）。
+          如果只有注意力，无论堆多少层，每个位置能得到的都只是其他位置信息的线性组合，
+          表达能力受限。
+        </p>
+        <p>
+          <strong>FFN 是「计算」</strong>：它包含非线性激活，能在每个位置上
+          独立地做复杂的特征变换。它负责把收集到的信息加工成新的、更抽象的东西。
+        </p>
+        <p>
+          类比：开会时你需要「听别人说」（注意力）和「自己思考」（FFN）交替进行。
+          只听说不思考，或者只思考不交流，都做不成事。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>用参数量公式估算一个 d=4096, N=32, V=32000 的模型。</summary>
+      <div class="quiz__answer">
+        <p>
+          $$\text{参数量} \approx 12 \times 32 \times 4096^2 + 32000 \times 4096$$
+        </p>
+        <p>
+          第一项：$12 \times 32 \times 16{,}777{,}216 = 6.44 \times 10^9$<br>
+          第二项：$32000 \times 4096 = 1.31 \times 10^8$
+        </p>
+        <p>
+          总计约 <strong>6.57 × 10⁹，也就是约 6.6B</strong>。
+          这个配置接近 LLaMA-7B（实际 6.7B），误差在 2% 以内。
+        </p>
+        <p>
+          注意第一项主导了整个计算——所以估算大模型参数量时，
+          记住「每层约 $12d^2$」就够了，词嵌入只在 $d$ 很小时才显著。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>交叉注意力里，为什么 Q 必须来自解码器而不是编码器？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为 Q 代表「需求」，K/V 代表「可用的信息」。
+        </p>
+        <p>
+          在翻译任务里，解码器正在生成目标语言，它需要问的是
+          「为了写出下一个词，我应该看源句子的哪里」。所以 Q 必须由解码器的当前状态产生。
+        </p>
+        <p>
+          而编码器提供的是「源句子的所有信息」，作为被查询的对象，
+          自然扮演 K（标签）和 V（内容）的角色。
+        </p>
+        <p>
+          如果反过来让编码器去查询解码器，那就变成「源句子在找目标语言里相关的词」，
+          这个方向对生成任务没有意义——生成是由解码器驱动的。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么现代大模型都用 Pre-Norm 而不是原论文的 Post-Norm？</summary>
+      <div class="quiz__answer">
+        <p>
+          关键在于<strong>残差路径是否「干净」</strong>。
+        </p>
+        <p>
+          <strong>Post-Norm：</strong>$\mathbf{x} = \text{LN}(\mathbf{x} + \text{Sublayer}(\mathbf{x}))$。
+          归一化在残差相加之后，所以梯度回传时要穿过每一层的 LayerNorm。
+          在很深的网络里，这会累积误差，导致训练不稳定，必须配合精心设计的 warmup。
+        </p>
+        <p>
+          <strong>Pre-Norm：</strong>$\mathbf{x} = \mathbf{x} + \text{Sublayer}(\text{LN}(\mathbf{x}))$。
+          残差路径上没有任何操作，梯度可以从最后一层原封不动地流回第一层——
+          和 ResNet 的恒等通路完全一样。
+        </p>
+        <p>
+          代价是 Pre-Norm 的最终效果可能略逊于调好的 Post-Norm，
+          但它的<strong>稳定性</strong>在超大规模训练中价值更高。
+          当你训练一次要花几千万美元时，你会选择那个「肯定能训起来」的方案。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么 Decoder-only 能同时做好理解和生成？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为「理解」可以被表述为「预测下一个词」的一个特例。
+        </p>
+        <p>
+          比如情感分类，你可以把输入写成：
+          <code>评论：这家餐厅太棒了。情感：[MASK]</code>，
+          然后让模型预测 <code>[MASK]</code> 位置的下一个词。模型会输出「正面」的概率最高。
+          同理，问答可以写成 <code>问题：…… 答案：</code>。
+        </p>
+        <p>
+          这种「把任务变成续写」的能力叫<strong>上下文学习</strong>（in-context learning），
+          是 GPT-3 论文最重要的发现。它意味着<strong>不需要为每个任务改架构或微调</strong>，
+          只要改变输入的文本格式就行。
+        </p>
+        <p>
+          相比之下，BERT 类模型虽然理解能力很强，但它的训练目标是「完形填空」，
+          无法自然地做从左到右的生成。在生成式 AI 成为主流的今天，
+          这成了决定性的劣势。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    我们已经有了完整的架构。现在最后一个问题：
+    <strong>用它来做什么？</strong>
+  </p>
+
+  <p>
+    答案是：只做一件事——<strong>预测下一个词</strong>。
+    听起来简单到荒谬，但下一章你会看到，
+    当这件事被做到极致、规模做到万亿参数时，
+    翻译、推理、写代码、做数学题这些能力会<strong>自动涌现</strong>出来。
+  </p>
+
+  <p>
+    这一章会讲清楚 Tokenization、交叉熵损失、困惑度、
+    以及那条决定了整个行业投资规模的「缩放律」曲线。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

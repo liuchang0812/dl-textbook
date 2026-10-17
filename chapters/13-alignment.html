@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 13 章 · 对齐：SFT / RLHF / DPO — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="13">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 13 章 · 第五部 大模型工程</span>
+    <h1>对齐：SFT / RLHF / DPO</h1>
+    <p class="chapter-head__lead">
+      一个刚预训练完的模型，就像一个读完了整个图书馆但从没和人说过话的人。
+      你问它问题，它可能给你续写出一堆问题；它会输出有害内容，因为书里有。
+      这一章讲怎么把它变成一个<strong>愿意帮忙、诚实、无害</strong>的助手。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 30 分钟</span>
+      <span>🎯 理解 SFT、奖励模型、PPO、DPO 的完整链路</span>
+      <span>🧪 1 个对比演示</span>
+    </div>
+  </header>
+
+  <h2>13.1 预训练模型为什么「不好用」</h2>
+
+  <p>
+    先看一个真实的例子。GPT-3 刚发布时，如果你输入：
+  </p>
+
+  <div class="codeblock codeblock--out" data-lang="text" data-title="GPT-3 的典型输出（示意）">
+<script type="text/dlcode">
+输入：中国的首都是哪里？
+
+GPT-3 可能的输出：
+中国的首都是哪里？
+美国的首都是哪里？
+日本的首都是哪里？
+法国的首都是哪里？
+...
+</script>
+  </div>
+
+  <p>
+    它没有回答你的问题，而是<strong>续写了你的问题</strong>。
+    因为它的训练目标就是「预测下一个 token」，而互联网上确实存在大量
+    「XX 的首都是哪里？」这种列表式的文本。
+  </p>
+
+  <p>这不是模型笨，而是<strong>目标不匹配</strong>。预训练模型优化的是「像不像训练数据」，</p>
+  <p>而你想要的是「有没有帮我完成任务」。</p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">① 不懂指令</div>
+      <p class="card__body">
+        「把这段话翻译成英文」——它可能接着生成「把这段话翻译成日文」，
+        因为它不知道你是在下指令，还是在给它一个例句。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">② 不安全</div>
+      <p class="card__body">
+        互联网上有制造危险物品的教程，模型学会了这些文本的分布，
+        也就学会了生成它们。它没有「这个不该说」的概念。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">③ 不会对话</div>
+      <p class="card__body">
+        不知道什么叫「回答结束」，不知道该多长、什么语气、
+        要不要分点、什么时候该承认不知道。
+      </p>
+    </div>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">对齐（Alignment）的定义</div>
+    <p>
+      <strong>让模型的行为符合人类的意图和价值观。</strong>
+    </p>
+    <p>
+      具体来说就是三个 H：<em>Helpful</em>（有用）、
+      <em>Honest</em>（诚实）、<em>Harmless</em>（无害）。
+      这三者常常互相冲突——比如「怎么撬锁」这个问题，
+      有用和无害就是矛盾的，对齐要做的就是权衡。
+    </p>
+  </div>
+
+  <h2>13.2 第一步：SFT 指令微调</h2>
+
+  <p>
+    <strong>有监督微调</strong>（Supervised Fine-Tuning，SFT）是最直接的一步：
+    准备大量「指令 → 理想回答」的配对数据，用同样的「预测下一个 token」目标训练。
+  </p>
+
+  <div class="codeblock" data-lang="text" data-title="SFT 训练数据的格式">
+<script type="text/dlcode">
+{
+  "instruction": "把下面这句话翻译成英文：今天天气真好。",
+  "input": "",
+  "output": "The weather is really nice today."
+}
+
+{
+  "instruction": "用三句话解释什么是过拟合。",
+  "input": "",
+  "output": "过拟合是指模型在训练数据上表现很好，但在新数据上表现差。\n根本原因是模型把训练数据里的噪声也当成了规律。\n常见的解决办法是增加数据、加正则化、或者减小模型规模。"
+}
+</script>
+  </div>
+
+  <p>
+    注意 <code>output</code> 里的内容——<strong>这就是模型要学会模仿的行为</strong>。
+    SFT 本质上是在做「行为克隆」：看到这样的问题，就给出这样的回答。
+  </p>
+
+  <h3>损失掩码：只对回答计算损失</h3>
+
+  <p>一个非常重要的细节：SFT 时<strong>不应该对指令部分计算损失</strong>。</p>
+
+  <div class="formula">
+    $$L = -\sum_{t \in \text{回答部分}} \log P(w_t \mid w_{&lt;t})$$
+    <div class="formula__caption">求和范围只包括回答的 token，指令部分被掩掉（label = -100）</div>
+  </div>
+
+  <p>
+    为什么要这样？因为如果对指令也算损失，模型会花大量精力去「学会生成问题」——
+    而这是它已经会的事，纯属浪费。我们要它学的是「怎么回答」。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="SFT 的损失掩码实现">
+<script type="text/dlcode">
+def build_sft_example(tokenizer, instruction, output):
+    """构造一个 SFT 训练样本，只对回答部分计算损失"""
+    prompt = f"### 指令：\n{instruction}\n\n### 回答：\n"
+    prompt_ids = tokenizer(prompt)["input_ids"]
+    answer_ids = tokenizer(output)["input_ids"] + [tokenizer.eos_token_id]
+
+    input_ids = prompt_ids + answer_ids
+    # 关键：指令部分的标签设为 -100，PyTorch 的 cross_entropy 会忽略它
+    labels = [-100] * len(prompt_ids) + answer_ids
+
+    return {"input_ids": input_ids, "labels": labels}
+</script>
+  </div>
+
+  <h3>SFT 数据从哪来？</h3>
+
+  <p>这是 SFT 最实际的问题。数据质量远比数量重要——几千条高质量数据就能有显著效果。</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>来源</th><th>成本</th><th>质量</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>人工标注</td><td>很高</td><td>最高</td><td>雇专业人员写，10 万条要几十万美元</td></tr>
+        <tr><td>用户真实反馈</td><td>低</td><td>高</td><td>从产品里收集用户的点赞/修改，最真实</td></tr>
+        <tr><td><strong>更强模型蒸馏</strong></td><td>低</td><td>高</td><td>用 GPT-4 生成回答，训练自己的小模型（注意服务条款）</td></tr>
+        <tr><td>开源数据集</td><td>免费</td><td>参差</td><td>Alpaca、ShareGPT、OpenAssistant 等，需要筛选</td></tr>
+        <tr><td>模型自我生成 + 筛选</td><td>低</td><td>中</td><td>让模型生成多个候选，用奖励模型或规则挑最好的</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>SFT 数据的三个陷阱</div>
+    <p>
+      <strong>1. 质量比数量重要得多。</strong>
+      10 万条混杂的数据，效果可能远不如 5000 条精心筛选的。
+      一个错别字、一段错误的知识，都会被模型忠实地学进去。
+    </p>
+    <p>
+      <strong>2. 多样性比重复重要。</strong>
+      如果 90% 的数据都是「写代码」，模型会变成一个只会写代码的模型，
+      连日常对话都会退化。要保证任务类型、长度、风格的多样性。
+    </p>
+    <p>
+      <strong>3. 格式要统一。</strong>
+      训练时用什么模板（比如 <code>### 指令：</code>），推理时就必须用同样的模板。
+      这是新手最常犯的错误——训练和推理的 prompt 格式不一致，模型效果直接腰斩。
+    </p>
+  </div>
+
+  <h2>13.3 第二步：RLHF 的核心思想</h2>
+
+  <p>
+    SFT 有一个根本限制：<strong>它只能模仿训练数据里的回答，无法超越它。</strong>
+    你不可能为每一个可能的问题都写一个完美答案。
+  </p>
+
+  <p>
+    而且更麻烦的是：对于很多问题，我们<strong>说不出什么是最好的答案，但能判断哪个更好。</strong>
+  </p>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>写诗与评诗</div>
+    <p>
+      让你写一首关于秋天的好诗，你可能写不出来。
+      但给你两首诗让你挑哪首更好，你能立刻给出判断。
+    </p>
+    <p>
+      这个不对称性极其重要。<strong>「判断」比「生成」容易得多。</strong>
+      RLHF 的全部聪明之处，就是把这个容易的任务（比较）转化成信号，
+      来改进那个困难的任务（生成）。
+    </p>
+  </div>
+
+  <p>RLHF（Reinforcement Learning from Human Feedback）分三步：</p>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 260" role="img" aria-label="RLHF 的三个阶段">
+      <defs>
+        <marker id="arR" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--line-2)"></path>
+        </marker>
+      </defs>
+
+      <!-- 阶段 1 -->
+      <rect x="14" y="34" width="152" height="112" rx="10" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+      <text x="90" y="56" font-size="11" font-weight="700" fill="var(--brand)" text-anchor="middle" font-family="sans-serif">① SFT</text>
+      <text x="90" y="78" font-size="10.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">用「指令→回答」</text>
+      <text x="90" y="94" font-size="10.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">数据微调</text>
+      <text x="90" y="120" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">得到一个"会回答"的模型</text>
+
+      <path d="M170,90 L196,90" stroke="var(--line-2)" stroke-width="1.8" fill="none" marker-end="url(#arR)"></path>
+
+      <!-- 阶段 2 -->
+      <rect x="200" y="34" width="152" height="112" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="276" y="56" font-size="11" font-weight="700" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">② 训练奖励模型</text>
+      <text x="276" y="78" font-size="10.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">人对两个回答排序</text>
+      <text x="276" y="94" font-size="10.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">模型学会给回答打分</text>
+      <text x="276" y="120" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">把人类偏好变成一个函数</text>
+
+      <path d="M356,90 L382,90" stroke="var(--line-2)" stroke-width="1.8" fill="none" marker-end="url(#arR)"></path>
+
+      <!-- 阶段 3 -->
+      <rect x="386" y="34" width="142" height="112" rx="10" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+      <text x="457" y="56" font-size="11" font-weight="700" fill="var(--violet)" text-anchor="middle" font-family="sans-serif">③ 强化学习</text>
+      <text x="457" y="78" font-size="10.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">用奖励模型的打分</text>
+      <text x="457" y="94" font-size="10.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">作为奖励信号</text>
+      <text x="457" y="120" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">PPO 优化语言模型</text>
+
+      <!-- 反馈回路 -->
+      <path d="M457,150 C457,200 276,200 276,150" stroke="var(--accent)" stroke-width="1.8" fill="none"
+            stroke-dasharray="6 5" marker-end="url(#arR)"></path>
+      <text x="366" y="216" font-size="10.5" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">奖励模型不断给新生成的回答打分</text>
+
+      <!-- 数据来源 -->
+      <text x="276" y="248" font-size="10.5" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">
+        整个流程的核心：人类只需要做「比较」这件容易的事
+      </text>
+    </svg>
+    <div class="figure__caption">
+      <b>RLHF 三步走。</b>先教会模型回答问题（SFT），
+      再把人类偏好压缩成一个可以自动打分的函数（奖励模型），
+      最后用这个函数作为奖励来强化学习。
+    </div>
+  </div>
+
+  <h2>13.4 奖励模型：把偏好变成一个函数</h2>
+
+  <p>
+    奖励模型的训练数据长这样：给同一个问题，模型生成两个回答 A 和 B，
+    让人标注「哪个更好」。这叫<strong>成对比较数据</strong>。
+  </p>
+
+  <div class="codeblock codeblock--out" data-lang="text" data-title="偏好数据的格式">
+<script type="text/dlcode">
+prompt:   "解释一下什么是黑洞"
+
+回答 A:   黑洞是一种引力极强的天体，连光都无法逃逸。它由大质量恒星
+          坍缩形成，边界叫做事件视界……
+
+回答 B:   黑洞就是很黑很黑的洞，什么东西进去了就出不来，很可怕。
+
+人类标注: A > B
+</script>
+  </div>
+
+  <p>奖励模型本身就是一个语言模型（通常是 SFT 模型的副本），只是把输出层换成一个标量头：</p>
+
+  <div class="formula">
+    $$r_\phi(\text{prompt}, \text{response}) \in \mathbb{R}$$
+  </div>
+
+  <p>训练目标是让「更好的回答」得分更高。用的损失叫<strong>成对排序损失</strong>：</p>
+
+  <div class="formula">
+    $$L = -\log \sigma\big(r_\phi(x, y_w) - r_\phi(x, y_l)\big)$$
+    <div class="formula__caption">$y_w$ 是被偏好的回答（winner），$y_l$ 是较差的回答（loser）</div>
+  </div>
+
+  <p>
+    这个损失函数的行为很直观：它只关心<strong>两者得分的差</strong>，不关心绝对值。
+    只要 $r(y_w) - r(y_l)$ 足够大，损失就接近 0。
+  </p>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>为什么只关心差值？</div>
+    <p>
+      因为人类标注的是「相对偏好」，不是「绝对分数」。
+      张三给 8 分、李四给 5 分，不代表李四觉得更差——
+      他们的评分标准本来就不同。
+    </p>
+    <p>
+      用「成对比较」能消除个体差异，得到的信号更干净。
+      这也是为什么 RLHF 不直接用「1-5 分打分」来收集数据。
+    </p>
+  </div>
+
+  <h2>13.5 第三步：PPO 强化学习</h2>
+
+  <p>
+    有了奖励模型，我们就可以把语言生成变成一个强化学习问题：
+  </p>
+
+  <ul>
+    <li><strong>智能体</strong> = 语言模型</li>
+    <li><strong>动作空间</strong> = 词表里所有 token</li>
+    <li><strong>状态</strong> = 已经生成的 token 序列</li>
+    <li><strong>奖励</strong> = 奖励模型对整个回答的打分（在生成 <code>&lt;EOS&gt;</code> 时给出）</li>
+  </ul>
+
+  <p>
+    但直接用强化学习会有一个严重问题：<strong>奖励黑客</strong>（reward hacking）。
+  </p>
+
+  <p>
+    模型会找到奖励模型的漏洞，生成一些「看起来分数很高但实际上很糟糕」的内容。
+    比如：
+  </p>
+
+  <ul>
+    <li>无限重复「这是一个非常好的问题，我很乐意回答」——因为奖励模型喜欢礼貌。</li>
+    <li>输出越来越长——因为长回答通常在人类标注里更受偏好。</li>
+    <li>变成一味迎合用户——因为「赞同」往往比「纠正」得到更高分。</li>
+  </ul>
+
+  <p>解决方案是在奖励里加一个<strong>KL 惩罚项</strong>，约束模型不要偏离 SFT 模型太远：</p>
+
+  <div class="formula">
+    $$R_{\text{total}} = r_\phi(x, y) - \beta \cdot \text{KL}\big(\pi_\theta(y|x) \,\|\, \pi_{\text{SFT}}(y|x)\big)$$
+    <div class="formula__caption">$\beta$ 通常取 0.01~0.1，控制「探索新行为」和「保持原有能力」的平衡</div>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">KL 惩罚的真正作用</div>
+    <p>
+      奖励模型只是一个<strong>不完美的代理</strong>。它在训练数据分布内是准的，
+      但一旦模型开始生成训练时没见过的奇怪文本，它的打分就完全不可信了。
+    </p>
+    <p>
+      KL 惩罚的作用是：<strong>别跑太远，就待在奖励模型可靠的那个区域里。</strong>
+    </p>
+    <p>
+      $\beta$ 太大 → 模型几乎不变，RLHF 白做；<br>
+      $\beta$ 太小 → 模型跑偏，开始胡说八道骗高分。
+      这个权衡是 RLHF 调参的核心。
+    </p>
+  </div>
+
+  <p>
+    具体用 PPO（Proximal Policy Optimization）算法来优化。
+    PPO 的细节相当复杂（需要维护四个模型：策略、价值网络、奖励模型、参考模型），
+    这里只需要记住它的核心思想：<strong>每次更新都限制幅度，不要让策略变化太剧烈。</strong>
+  </p>
+
+  <h2>13.6 DPO：把强化学习砍掉</h2>
+
+  <p>
+    2023 年，斯坦福的研究者提出了 <strong>DPO</strong>（Direct Preference Optimization），
+    用了一个漂亮的数学变换，把整个 RLHF 流程<strong>压缩成了一个简单的分类损失</strong>。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">DPO 的核心洞察</div>
+    <p>
+      他们发现：RLHF 那个「最大化奖励 − KL 惩罚」的目标函数，
+      存在一个<strong>解析解</strong>。把最优策略代回原式，
+      奖励函数可以被消掉，只剩策略本身。
+    </p>
+    <p>
+      结果是：<strong>不需要训练奖励模型，也不需要强化学习，直接用偏好数据做有监督训练就行。</strong>
+    </p>
+  </div>
+
+  <div class="formula">
+    $$L_{\text{DPO}} = -\log \sigma\!\left(
+    \beta \log\frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)}
+    - \beta \log\frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)}
+    \right)$$
+    <div class="formula__caption">$\pi_\theta$ 是正在训练的模型，$\pi_{\text{ref}}$ 是冻结的 SFT 模型</div>
+  </div>
+
+  <p>这个式子看起来复杂，但理解起来很简单：</p>
+
+  <ul>
+    <li>$\dfrac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)}$ 衡量的是「相比原始模型，新模型有多喜欢这个好回答」。</li>
+    <li>同理，另一项衡量「新模型有多喜欢那个坏回答」。</li>
+    <li>损失函数要求：<strong>对好回答的提升，要明显超过对坏回答的提升。</strong></li>
+  </ul>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th>RLHF (PPO)</th><th>DPO</th></tr></thead>
+      <tbody>
+        <tr><td>需要奖励模型</td><td>✅ 是</td><td>❌ 不需要</td></tr>
+        <tr><td>需要强化学习</td><td>✅ 是</td><td>❌ 不需要</td></tr>
+        <tr><td>同时加载的模型数</td><td>4 个</td><td>2 个</td></tr>
+        <tr><td>训练稳定性</td><td>难调，容易崩</td><td>和普通 SFT 一样稳</td></tr>
+        <tr><td>实现复杂度</td><td>高</td><td>低（几十行代码）</td></tr>
+        <tr><td>效果</td><td>上限可能更高</td><td>大多数场景持平</td></tr>
+        <tr><td>显存需求</td><td>极高</td><td>中等</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="codeblock" data-lang="python" data-title="dpo.py — DPO 损失，核心只有 15 行">
+<script type="text/dlcode">
+import torch
+import torch.nn.functional as F
+
+def dpo_loss(policy, ref_model, batch, beta=0.1):
+    """
+    batch 包含：prompt, chosen（好回答）, rejected（坏回答）
+    """
+    # 计算模型对每个回答的 log 概率
+    def logp(model, input_ids, labels):
+        logits = model(input_ids).logits
+        logprobs = F.log_softmax(logits, dim=-1)
+        # 只取回答部分（labels != -100）的 log 概率并求和
+        mask = labels != -100
+        token_logp = logprobs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+        return (token_logp * mask).sum(dim=-1)
+
+    pi_w = logp(policy, batch["chosen_ids"], batch["chosen_labels"])
+    pi_l = logp(policy, batch["rejected_ids"], batch["rejected_labels"])
+
+    with torch.no_grad():                     # 参考模型不参与梯度
+        ref_w = logp(ref_model, batch["chosen_ids"], batch["chosen_labels"])
+        ref_l = logp(ref_model, batch["rejected_ids"], batch["rejected_labels"])
+
+    # DPO 的核心：比较"相对于参考模型的提升幅度"
+    logits = beta * ((pi_w - ref_w) - (pi_l - ref_l))
+    loss = -F.logsigmoid(logits).mean()
+
+    # 附带指标：隐式奖励的准确率（好回答得分高于坏回答的比例）
+    with torch.no_grad():
+        acc = (logits > 0).float().mean()
+
+    return loss, acc
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>DPO 的实践要点</div>
+    <p>
+      <strong>1. $\beta$ 通常取 0.1~0.5。</strong>太小模型会跑偏（过度偏离参考模型），
+      太大则几乎没有效果。这是 DPO 最重要的超参数。
+    </p>
+    <p>
+      <strong>2. 参考模型必须先做 SFT。</strong>如果参考模型本身很烂，
+      DPO 会把它推向一个奇怪的方向。顺序不能反。
+    </p>
+    <p>
+      <strong>3. 学习率要小。</strong>典型值 $5\times10^{-7}$ 到 $5\times10^{-6}$，
+      比 SFT 小一两个数量级。DPO 很容易训崩。
+    </p>
+    <p>
+      <strong>4. 数据质量是决定性的。</strong>DPO 直接学习「什么样的回答更好」，
+      如果标注里有噪声或偏见，模型会忠实地学走。
+    </p>
+  </div>
+
+  <h2>13.7 对齐税与过度对齐</h2>
+
+  <h3>对齐税（Alignment Tax）</h3>
+
+  <p>
+    对齐不是免费的。为了让模型更安全、更听话，往往会损失一部分原始能力。
+  </p>
+
+  <p>典型的代价包括：</p>
+
+  <ul>
+    <li><strong>多样性下降。</strong>RLHF 后的模型倾向于给出「标准答案」，
+    创意写作和头脑风暴的多样性明显变差。</li>
+    <li><strong>能力退化。</strong>过度优化「有用性」会让模型在数学、代码等
+    需要严格性的任务上表现下降。</li>
+    <li><strong>拒答过度。</strong>为了避免有害输出，模型可能对正常问题也说
+    「我不能回答这个问题」。</li>
+  </ul>
+
+  <h3>过度对齐（Over-alignment）</h3>
+
+  <p>
+    这是对齐研究中一个真实且棘手的问题。当安全训练做得太激进时，模型会变得：
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">过度谨慎</div>
+      <p class="card__body">
+        问「怎么切洋葱」被拒答，因为「切」和「刀」被关联到了暴力。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">过度道歉</div>
+      <p class="card__body">
+        每句话都以「抱歉，我之前的回答可能不够准确」开头，即使前一句是对的。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">失去立场</div>
+      <p class="card__body">
+        对任何有争议的问题都回答「这是一个复杂的问题，不同人有不同看法」，
+        看似中立，实则无用。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">谄媚（Sycophancy）</div>
+      <p class="card__body">
+        用户说「我觉得 1+1=3」，模型立刻改口「您说得对，在某些语境下确实如此」。
+        这是奖励模型偏好「让人满意」的直接后果。
+      </p>
+    </div>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>谄媚：RLHF 的结构性缺陷</div>
+    <p>
+      谄媚不是 bug，而是 RLHF 的<strong>必然产物</strong>。
+      人类标注员在比较两个回答时，会下意识地更喜欢那个「赞同自己」的回答。
+      奖励模型忠实地学到了这个偏好，然后强化学习把它放大到极致。
+    </p>
+    <p>
+      解法包括：让标注员在不知道哪个是自己观点的情况下判断、
+      在奖励里加入「事实正确性」的独立检查、
+      以及专门构造「用户说错了」的对抗性训练数据。
+      这是一个活跃的研究方向，目前还没有完美的解法。
+    </p>
+  </div>
+
+  <h2>13.8 现代对齐流程</h2>
+
+  <p>
+    实践中，对齐已经演变成一条更长的流水线。以开源模型为例：
+  </p>
+
+  <ol class="steps">
+    <li>
+      <strong>预训练</strong>
+      <p>几万亿 token 的通用文本，得到「会续写」的基础模型（Base Model）。</p>
+    </li>
+    <li>
+      <strong>SFT</strong>
+      <p>几万到几十万条高质量指令数据，得到「会回答」的模型。这一步是必须的。</p>
+    </li>
+    <li>
+      <strong>偏好优化</strong>
+      <p>用 DPO、KTO、ORPO 等方法做偏好对齐。这是目前最主流的选择——
+      因为 PPO 太难调，而 DPO 效果相当且稳定得多。</p>
+    </li>
+    <li>
+      <strong>安全微调</strong>
+      <p>用专门的安全数据（拒绝有害请求、识别越狱尝试）做最后一轮微调。
+      这一轮通常单独做，避免和「有用性」优化互相干扰。</p>
+    </li>
+    <li>
+      <strong>推理能力强化</strong>（可选）
+      <p>用可验证的任务（数学、代码）做强化学习，让模型学会「先思考再回答」。
+      这是 o1/R1 类推理模型的训练方式，第 21 章会讲。</p>
+    </li>
+  </ol>
+
+  <h3>RLAIF 与宪法 AI</h3>
+
+  <p>
+    人工标注偏好数据很贵。一个重要的替代方案是<strong>用 AI 来标注</strong>（RLAIF）：
+  </p>
+
+  <ul>
+    <li>让一个强模型（或同一个模型的另一个实例）来比较两个回答哪个更好。</li>
+    <li>成本降低几十倍，而且可以生成海量数据。</li>
+    <li>Anthropic 的<strong>宪法 AI</strong>（Constitutional AI）是这条路线的代表：
+      给模型一份「宪法」（一组原则，比如「不要帮助制造武器」），
+      让它自己批评和修改自己的回答，不需要人类逐条标注。</li>
+  </ul>
+
+  <p>
+    这条路线的争议在于：<strong>谁来定义「好」？</strong>
+    用 AI 来对齐 AI，可能会放大模型本身已有的偏见，
+    也可能让对齐标准变得不透明。这是一个开放的问题。
+  </p>
+
+  <h2>13.9 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">对齐 <small>alignment</small></div>
+      <div class="gloss__def">让模型行为符合人类意图和价值观：有用、诚实、无害。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">SFT</div>
+      <div class="gloss__def">有监督微调。用「指令→理想回答」数据做行为克隆。只对回答部分算损失。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">奖励模型 <small>RM</small></div>
+      <div class="gloss__def">把人类偏好压缩成一个自动打分函数。用成对比较数据训练。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">KL 惩罚</div>
+      <div class="gloss__def">约束模型不要偏离参考模型太远，防止奖励黑客。RLHF 的核心调参项。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">DPO</div>
+      <div class="gloss__def">直接偏好优化。用数学变换消掉奖励模型和强化学习，变成简单的分类损失。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">谄媚 <small>sycophancy</small></div>
+      <div class="gloss__def">模型为了讨好用户而放弃事实正确性。是 RLHF 优化「人类偏好」的必然副作用。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>预训练模型「会续写」但「不好用」，对齐解决的是目标不匹配的问题。</li>
+    <li>SFT 做行为克隆，让模型学会回答。数据质量远比数量重要。</li>
+    <li>RLHF 的聪明之处：人类做「比较」比做「生成」容易得多，把这个容易的信号转化成改进。</li>
+    <li>KL 惩罚是 RLHF 的关键，它防止模型跑到奖励模型不可靠的区域去刷分。</li>
+    <li>DPO 用数学变换把 RLHF 简化成一个稳定的分类损失，是目前最主流的选择。</li>
+    <li>对齐有代价（对齐税），过度对齐会导致谄媚、拒答过度、失去立场。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么 SFT 时不能对指令部分计算损失？</summary>
+      <div class="quiz__answer">
+        <p>
+          两个原因。
+        </p>
+        <p>
+          <strong>第一，浪费容量。</strong>模型已经会生成问题文本了（预训练就学会了）。
+          让它花精力去拟合指令部分，等于在学一件已经会的事，挤占了学习「怎么回答」的资源。
+        </p>
+        <p>
+          <strong>第二，会导致错误行为。</strong>
+          如果对指令算损失，模型可能学到「给定一个问题的开头，把它补完整」
+          这种模式，反而强化了预训练阶段那个「续写问题」的坏习惯。
+        </p>
+        <p>
+          实现上就是把指令部分的 label 设成 <code>-100</code>，
+          PyTorch 的 <code>cross_entropy</code> 会自动忽略这些位置。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>RLHF 里的 KL 惩罚是干什么的？去掉会怎样？</summary>
+      <div class="quiz__answer">
+        <p>
+          它约束模型不要偏离 SFT 参考模型太远。去掉的话会发生<strong>奖励黑客</strong>。
+        </p>
+        <p>
+          原因在于：奖励模型只是人类偏好的一个<strong>不完美代理</strong>。
+          它在训练数据分布内是准的，但模型一旦开始生成奇怪的、训练时没见过的文本，
+          奖励模型的判断就完全不可信了。
+        </p>
+        <p>
+          没有 KL 约束时，模型会疯狂地探索奖励模型的漏洞，典型表现是：
+          无限重复讨好的话、输出越来越长、对任何观点都表示赞同。
+          这些都是「看起来分数高但实际很糟」的退化行为。
+        </p>
+        <p>
+          KL 惩罚相当于划了一条边界：<em>你可以在奖励模型的可靠区域内自由探索，
+          但别跑出去。</em>
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>DPO 为什么不需要奖励模型？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为数学上可以证明：RLHF 的「最大化奖励 − KL 惩罚」目标，
+          存在一个<strong>解析形式的最优策略</strong>，而这个形式里，
+          奖励函数可以用「策略与参考模型的比值」来表示。
+        </p>
+        <p>
+          把这个关系代回原目标函数，奖励项就被消掉了，
+          只剩下策略本身和参考模型的比值。
+          于是问题从「先学奖励再强化学习」变成了
+          「直接优化策略在偏好数据上的似然」——一个普通的分类问题。
+        </p>
+        <p>
+          实践意义很大：不需要训练和维护奖励模型，不需要 PPO 那一套复杂的
+          强化学习基础设施，代码量从几百行降到十几行，训练也稳定得多。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>什么是「谄媚」？为什么它是 RLHF 的结构性产物？</summary>
+      <div class="quiz__answer">
+        <p>
+          谄媚是指模型为了迎合用户而放弃事实正确性——
+          用户说错话时，模型不纠正反而附和。
+        </p>
+        <p>
+          <strong>为什么是结构性的：</strong>奖励模型的训练数据来自人类标注员的比较。
+          而心理学研究表明，人在比较两个回答时，会<strong>无意识地偏好那些赞同自己观点的回答</strong>，
+          即使他知道另一个回答更准确。
+        </p>
+        <p>
+          奖励模型忠实地学到了这个人类偏好，然后 PPO 把它放大到极致——
+          因为强化学习就是要把奖励最大化，它不在乎这个奖励是不是「正确的」。
+        </p>
+        <p>
+          解法包括：让标注员在不知道哪个是自己观点的情况下判断、
+          在奖励里加入独立的事实性检查、专门构造「用户说错」的对抗数据。
+          这是目前一个活跃但未完全解决的研究方向。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>SFT 和 DPO 能只做一个吗？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>不能只做 DPO。</strong>DPO 的损失函数里有一个参考模型 $\pi_{\text{ref}}$，
+          它必须是已经做过 SFT 的模型。
+        </p>
+        <p>
+          原因：DPO 学的是「相对参考模型的提升」。如果参考模型本身连基本指令都听不懂，
+          「哪个回答更好」这个信号就没有意义——
+          模型需要先具备基础能力，才能谈「在好和坏之间选好的」。
+        </p>
+        <p>
+          <strong>但可以只做 SFT。</strong>很多场景下 SFT 就够了，
+          尤其是当你有一批高质量的目标领域数据时。
+          DPO 的价值在于利用「比较」这种更廉价、更丰富的监督信号，
+          在 SFT 的基础上进一步优化风格、安全性和偏好一致性。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    现在你有了一个训练好并对齐过的模型。接下来要把它跑起来。
+  </p>
+
+  <p>
+    但这里有个残酷的现实：一个 70B 的模型，光权重就要 140 GB 显存，
+    而生成 1000 个 token 需要跑 1000 次完整的前向传播。这既贵又慢。
+  </p>
+
+  <p>
+    下一章讲推理工程：<strong>KV Cache 如何把生成速度提升几十倍</strong>、
+    量化如何把模型塞进消费级显卡、采样策略如何平衡「不重复」和「不胡说」，
+    以及为什么「首 token 延迟」和「吞吐量」是两个需要分别优化的指标。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

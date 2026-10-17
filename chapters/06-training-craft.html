@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 6 章 · 训练的艺术 — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="06">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 6 章 · 第二部 引擎篇</span>
+    <h1>训练的艺术</h1>
+    <p class="chapter-head__lead">
+      前五章讲的是原理，这一章讲的是<strong>手感</strong>。
+      初始化、归一化、正则化、学习率调度、调试方法论——
+      这些东西论文里通常只用一句话带过，但它们决定了你的模型能不能训出来。
+      这一章结束后，你就有能力独立 debug 一个不收敛的网络了。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 30 分钟</span>
+      <span>🎯 建立一套系统的训练调试方法论</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>6.1 一个模型训练不起来，可能有一百种原因</h2>
+
+  <p>
+    这是深度学习最让人挫败的地方。你的代码没有报错，损失函数也确实在下降，
+    但结果就是不对。你改了一个超参数，好像好了一点；再改另一个，又坏了。
+    没有报错信息，没有堆栈，只有一堆数字。
+  </p>
+
+  <p>
+    好消息是：<strong>90% 的失败都能归入下面这张表里的某一类。</strong>
+    先记住这张表，后面每一节都会展开。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>症状</th><th>最可能的原因</th><th>先试什么</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>损失完全不动</td><td>学习率为 0、梯度没清零、参数没注册到优化器</td><td>打印参数的 <code>.grad</code> 看是不是全 0</td></tr>
+        <tr><td>损失变成 nan</td><td>学习率太大、log(0)、除以 0、exp 溢出</td><td>学习率 ÷10，加梯度裁剪，检查数值稳定</td></tr>
+        <tr><td>损失下降然后爆炸</td><td>学习率后期太大、缺少 warmup</td><td>加 warmup + cosine 衰减</td></tr>
+        <tr><td>训练集好、验证集差</td><td>过拟合</td><td>加数据、加正则、减小模型、早停</td></tr>
+        <tr><td>训练集和验证集都差</td><td>欠拟合 / 学习率不对 / 模型太小</td><td>加大模型、调学习率、检查数据标签</td></tr>
+        <tr><td>损失剧烈震荡</td><td>批量太小、学习率太大</td><td>增大批量或降低学习率</td></tr>
+        <tr><td>验证损失先降后升</td><td>正常的过拟合信号</td><td>在最低点早停</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>6.2 初始化：一切都从这里开始</h2>
+
+  <h3>为什么不能全部初始化为 0？</h3>
+
+  <p>
+    这是新手最容易犯的错。如果所有参数都是 0，那么同一层里的每个神经元
+    收到的输入完全相同、计算出的输出完全相同、收到的梯度也完全相同。
+    它们会<strong>永远保持一模一样</strong>——等于花了 100 个神经元的钱，只买到了 1 个。
+  </p>
+
+  <p>这个现象叫<strong>对称性破缺失败</strong>。所以我们必须用随机数打破对称性。</p>
+
+  <h3>那随机数该取多大？</h3>
+
+  <p>
+    这才是真正的问题。取太大，信号会爆炸；取太小，信号会消失。
+    假设某一层有 $n_{in}$ 个输入，每个输入是均值 0、方差 $\sigma_x^2$ 的随机变量，
+    权重是均值 0、方差 $\sigma_w^2$ 的随机变量，那么输出 $z = \sum_i w_i x_i$ 的方差是：
+  </p>
+
+  <div class="formula">
+    $$\text{Var}(z) = n_{in} \cdot \sigma_w^2 \cdot \sigma_x^2$$
+    <div class="formula__caption">要让它等于 $\sigma_x^2$（信号不放大也不缩小），必须满足 $n_{in}\sigma_w^2 = 1$</div>
+  </div>
+
+  <p>由此得到两种经典初始化：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>方差</th><th>适用</th><th>直觉</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Xavier / Glorot</strong></td>
+          <td>$\dfrac{2}{n_{in}+n_{out}}$</td>
+          <td>Sigmoid / Tanh</td>
+          <td>同时考虑前向和反向的方差，取折中</td>
+        </tr>
+        <tr>
+          <td><strong>He / Kaiming</strong></td>
+          <td>$\dfrac{2}{n_{in}}$</td>
+          <td><strong>ReLU 及其变体</strong></td>
+          <td>ReLU 把一半输出砍成 0，方差减半，所以要乘 2 补回来</td>
+        </tr>
+        <tr>
+          <td><strong>正态 / 截断正态</strong></td>
+          <td>$\sigma = 0.02$</td>
+          <td>Transformer</td>
+          <td>GPT 系列的经验值，简单够用</td>
+        </tr>
+        <tr>
+          <td><strong>正交初始化</strong></td>
+          <td>正交矩阵</td>
+          <td>RNN</td>
+          <td>保证奇异值全为 1，梯度不会衰减</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="codeblock" data-lang="python" data-title="正确的初始化（PyTorch）">
+<script type="text/dlcode">
+import torch.nn as nn
+
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        # He 初始化：适合 ReLU 家族
+        nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)      # 偏置初始化为 0 是安全的
+
+    elif isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+
+    elif isinstance(m, nn.LayerNorm):
+        nn.init.ones_(m.weight)         # LayerNorm 的缩放初始化为 1
+        nn.init.zeros_(m.bias)
+
+model.apply(init_weights)
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>偏置为什么可以初始化为 0？</div>
+    <p>
+      因为偏置是<strong>每个神经元独立</strong>的。即使全为 0，
+      每个神经元收到的输入也不同（因为权重不同），所以不会出现对称性问题。
+      实践中偏置初始化为 0 是最常见的选择。
+    </p>
+    <p>
+      例外：某些门控结构（比如 LSTM 的遗忘门）会把偏置初始化成 1，
+      让网络一开始倾向于「记住」而不是「忘记」。
+    </p>
+  </div>
+
+  <h2>6.3 归一化：让信号保持在健康区间</h2>
+
+  <p>
+    即使初始化做对了，训练过程中参数不断变化，每层输入的分布也会漂移。
+    这会让后面的层疲于适应新的输入分布，训练变慢甚至失败。
+    归一化层的作用是<strong>把每层的输入强行拉回均值 0、方差 1</strong>。
+  </p>
+
+  <h3>BatchNorm：按「批量」维度归一化</h3>
+
+  <div class="formula">
+    $$\hat{x}_i = \frac{x_i - \mu_B}{\sqrt{\sigma_B^2 + \epsilon}}, \qquad y_i = \gamma \hat{x}_i + \beta$$
+    <div class="formula__caption">$\mu_B, \sigma_B$ 是当前批次内的均值和方差；$\gamma, \beta$ 是可学习的缩放和偏移</div>
+  </div>
+
+  <p>
+    注意最后的 $\gamma$ 和 $\beta$：<strong>归一化之后又给了网络「反归一化」的自由</strong>。
+    如果原分布真的更好，网络可以学出 $\gamma = \sigma_B$、$\beta = \mu_B$ 把它还原回去。
+    这让归一化永远不会有害。
+  </p>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>BatchNorm 的三个坑</div>
+    <p>
+      <strong>1. 训练和推理行为不一致。</strong>训练时用当前批次的统计量，
+      推理时没有批次，只能用训练期间累积的滑动平均。忘了切换
+      <code>model.eval()</code> 是经典 bug。
+    </p>
+    <p>
+      <strong>2. 小批量下会崩。</strong>批量只有 2 个样本时，算出来的均值方差毫无意义。
+      批量小于 16 时 BatchNorm 就开始不可靠了。
+    </p>
+    <p>
+      <strong>3. 不适合变长序列。</strong>序列长度不一致时，「跨样本同位置」的统计量没有意义。
+      这就是为什么 NLP 用 LayerNorm 而不是 BatchNorm。
+    </p>
+  </div>
+
+  <h3>LayerNorm：按「特征」维度归一化</h3>
+
+  <p>
+    LayerNorm 不看别的样本，只对<strong>单个样本自己的所有特征</strong>做归一化。
+    因此它和批量大小无关，也不区分训练和推理。
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 520 190" role="img" aria-label="BatchNorm 与 LayerNorm 的归一化方向对比">
+      <!-- BatchNorm -->
+      <text x="14" y="22" font-size="12" font-weight="700" fill="var(--ink)" font-family="sans-serif">BatchNorm：按列（跨样本）</text>
+      <g>
+        <rect x="14" y="34" width="220" height="112" rx="8" fill="none" stroke="var(--line-2)"></rect>
+        <rect x="14" y="34" width="220" height="28" fill="var(--brand-soft)"></rect>
+        <rect x="14" y="34" width="73" height="112" fill="rgba(59,110,245,.22)"></rect>
+        <g stroke="var(--line)" fill="none">
+          <line x1="87" y1="34" x2="87" y2="146"></line>
+          <line x1="160" y1="34" x2="160" y2="146"></line>
+          <line x1="14" y1="62" x2="234" y2="62"></line>
+          <line x1="14" y1="90" x2="234" y2="90"></line>
+          <line x1="14" y1="118" x2="234" y2="118"></line>
+        </g>
+        <g font-size="10" fill="var(--ink-4)" font-family="monospace" text-anchor="middle">
+          <text x="50" y="53">f₁</text><text x="123" y="53">f₂</text><text x="196" y="53">f₃</text>
+          <text x="50" y="81">…</text>
+        </g>
+        <g font-size="10" fill="var(--ink-3)" font-family="sans-serif">
+          <text x="6" y="81">样本1</text>
+          <text x="6" y="109">样本2</text>
+        </g>
+      </g>
+      <text x="14" y="168" font-size="11" fill="var(--ink-3)" font-family="sans-serif">依赖批量大小，训练/推理不一致</text>
+
+      <!-- LayerNorm -->
+      <text x="286" y="22" font-size="12" font-weight="700" fill="var(--ink)" font-family="sans-serif">LayerNorm：按行（单样本内）</text>
+      <g>
+        <rect x="286" y="34" width="220" height="112" rx="8" fill="none" stroke="var(--line-2)"></rect>
+        <rect x="286" y="34" width="220" height="28" fill="var(--violet-soft)"></rect>
+        <rect x="286" y="34" width="220" height="28" fill="rgba(124,58,237,.22)"></rect>
+        <g stroke="var(--line)" fill="none">
+          <line x1="359" y1="34" x2="359" y2="146"></line>
+          <line x1="432" y1="34" x2="432" y2="146"></line>
+          <line x1="286" y1="62" x2="506" y2="62"></line>
+          <line x1="286" y1="90" x2="506" y2="90"></line>
+          <line x1="286" y1="118" x2="506" y2="118"></line>
+        </g>
+        <g font-size="10" fill="var(--ink-4)" font-family="monospace" text-anchor="middle">
+          <text x="322" y="53">f₁</text><text x="395" y="53">f₂</text><text x="468" y="53">f₃</text>
+        </g>
+        <g font-size="10" fill="var(--ink-3)" font-family="sans-serif">
+          <text x="278" y="81">样本1</text>
+          <text x="278" y="109">样本2</text>
+        </g>
+      </g>
+      <text x="286" y="168" font-size="11" fill="var(--ink-3)" font-family="sans-serif">与批量无关，训练推理一致</text>
+    </svg>
+    <div class="figure__caption">
+      <b>归一化方向的区别。</b>BatchNorm 竖着统计（跨样本、同一特征），
+      LayerNorm 横着统计（同一样本、所有特征）。
+    </div>
+  </div>
+
+  <h3>RMSNorm：去掉均值，只保留方差</h3>
+
+  <p>
+    现代大模型（LLaMA、Qwen、Gemma）普遍用 RMSNorm。它去掉了「减均值」这一步：
+  </p>
+
+  <div class="formula">
+    $$\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d}x_i^2 + \epsilon}} \cdot \gamma$$
+    <div class="formula__caption">只除以均方根，不做中心化，也不需要 $\beta$ 偏置</div>
+  </div>
+
+  <p>
+    为什么可以省掉？因为实验发现「重新中心化」对效果贡献很小，
+    而省掉它能让计算量减少约 15%，并且不需要跨设备通信统计量。
+    在几万张 GPU 的训练里，这是很实在的收益。
+  </p>
+
+  <h3>Pre-Norm vs Post-Norm</h3>
+
+  <p>
+    还有一个工程细节：归一化层放在残差连接的<strong>里面</strong>还是<strong>外面</strong>？
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="两种残差结构">
+<script type="text/dlcode">
+# Post-Norm（原始 Transformer，2017）
+x = LayerNorm(x + Sublayer(x))       # 归一化在残差相加之后
+
+# Pre-Norm（现代大模型的主流）
+x = x + Sublayer(LayerNorm(x))       # 归一化在子层之前，残差路径是"干净"的
+</script>
+  </div>
+
+  <p>
+    Pre-Norm 的优势在于：残差路径上没有任何归一化操作，
+    梯度可以从最后一层<strong>原封不动地流回第一层</strong>。
+    这让非常深的模型也能稳定训练——GPT-3 有 96 层，如果不用 Pre-Norm 很难训起来。
+  </p>
+
+  <h2>6.4 正则化：对抗过拟合</h2>
+
+  <p>
+    过拟合的本质是「模型记住了训练数据里的噪声，而不是学到规律」。
+    所有正则化手段都在做同一件事：<strong>限制模型的有效容量</strong>。
+  </p>
+
+  <h3>方法一：L2 正则化 / 权重衰减</h3>
+
+  <p>
+    在损失里加一项惩罚参数的大小：$L' = L + \frac{\lambda}{2}\sum_i \theta_i^2$。
+    它让网络倾向于用「小权重」来解决问题。为什么小权重更好？
+  </p>
+
+  <p>
+    因为小权重意味着输出对输入的微小变化不敏感。
+    如果训练数据里有一个噪声点，模型不需要为了拟合它而把某个权重调得特别大。
+    <strong>平滑的函数更可能在测试集上正确。</strong>
+  </p>
+
+  <h3>方法二：Dropout</h3>
+
+  <p>
+    训练时，每一步随机「关掉」一部分神经元（通常 10%~50%），
+    被关掉的神经元在这一次前向和反向中完全不存在。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="Dropout 的实现（inverted dropout）">
+<script type="text/dlcode">
+def dropout(x, p=0.5, training=True):
+    if not training or p == 0:
+        return x                     # 推理时什么都不做
+    # 训练时：以概率 p 置零，然后除以 (1-p) 保持期望不变
+    mask = (np.random.rand(*x.shape) > p) / (1 - p)
+    return x * mask
+</script>
+  </div>
+
+  <p>
+    注意那个 <code>/(1-p)</code>：如果不做这个缩放，训练时输出的期望会比推理时小，
+    导致推理结果系统性偏移。除以 $(1-p)$ 之后，训练和推理的期望就一致了。
+    这个技巧叫「反向 Dropout」，是现代实现的标准做法。
+  </p>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>Dropout 为什么有效？两种解释</div>
+    <p>
+      <strong>解释一（集成学习）：</strong>每次前向传播都是一个不同的子网络
+      （因为随机关掉了一些神经元）。训练结束时，相当于训练了指数多个子网络，
+      推理时用的是它们的平均——这就是模型集成。
+    </p>
+    <p>
+      <strong>解释二（防止共适应）：</strong>神经元不能依赖某个特定同伴总是存在，
+      所以它必须学出更独立、更鲁棒的特征。这阻止了「几个神经元串通起来记住噪声」。
+    </p>
+    <p>
+      实践中第二种解释更接近真相，但第一种更好理解。
+    </p>
+  </div>
+
+  <h3>方法三：数据增强</h3>
+
+  <p>
+    这是<strong>最有效</strong>的正则化手段，而且几乎没有副作用。
+    对图像：随机裁剪、翻转、旋转、颜色抖动。对文本：同义词替换、回译。
+  </p>
+
+  <p>
+    关键原则是：<strong>增强必须保持语义不变。</strong>
+    把猫的图片水平翻转，它还是猫；但把「6」旋转 180° 变成「9」，
+    标签就错了——除非你的任务本来就不区分 6 和 9。
+  </p>
+
+  <h3>方法四：早停</h3>
+
+  <p>
+    最朴素也最有效的技巧：监控验证集损失，当它连续若干轮不再下降时就停下来，
+    并回滚到验证损失最低的那个检查点。
+  </p>
+
+  <p>
+    为什么有效？因为过拟合是一个渐进过程。验证损失先降后升，
+    最低点正好是「学到了规律但还没开始背噪声」的时刻。
+    <strong>不要用训练损失来决定何时停止——它几乎总是单调下降的。</strong>
+  </p>
+
+  <h3>方法五：标签平滑</h3>
+
+  <p>
+    分类任务里我们通常用 one-hot 标签（正确答案是 1，其他是 0）。
+    这等于告诉模型「绝对确信」。但真实世界没有绝对。
+    标签平滑把 1 换成 $1-\epsilon$，把 0 换成 $\epsilon/(K-1)$，通常 $\epsilon = 0.1$。
+  </p>
+
+  <p>
+    它防止模型为了逼近 1 而把 logits 推到无穷大，让模型更「谦虚」，
+    也缓解了它对错误标注的过度自信。Transformer 的原始论文就用了这个技巧。
+  </p>
+
+  <h2>6.5 亲手制造一次过拟合</h2>
+
+  <p>
+    现在把上面这些东西串起来看。下面的演示用 13 个带噪声的样本点拟合一条多项式曲线。
+    拖动滑块改变多项式次数，观察「训练误差」和「测试误差」的分道扬镳：
+  </p>
+
+  <div class="widget" data-widget="overfit">
+    <div class="widget__head"><span class="tag">交互 7</span>过拟合：模型越复杂越好吗？</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <canvas data-h="360"></canvas>
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">多项式次数 d</span><span class="ctrl__val" data-v="deg">1</span></div>
+            <input type="range" data-p="deg" min="0" max="12" step="1" value="1">
+          </div>
+          <div class="readout" data-role="info" style="margin-top:.8rem"></div>
+          <p class="widget__note" style="margin-top:.8rem">
+            慢慢从 d=1 拖到 d=12，盯住<strong>测试误差</strong>那一行。
+            它会先降后升——那个最低点，就是模型容量的甜点区。
+          </p>
+        </div>
+      </div>
+      <p class="widget__note">
+        橙色点是 13 个训练样本（真实函数 + 噪声），
+        <span style="color:#0f9d8f;font-weight:700">绿色虚线</span>是真实函数 $\sin(2\pi x)$，
+        <span style="color:#3b6ef5;font-weight:700">蓝色实线</span>是模型的拟合结果。
+        「测试误差」是在 200 个干净点上测出来的，代表泛化能力。
+      </p>
+    </div>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">偏差-方差权衡（Bias-Variance Tradeoff）</div>
+    <p>
+      <strong>欠拟合（高偏差）：</strong>模型太简单，连训练数据都学不好。
+      d=1 时曲线是直线，根本跟不上正弦波的起伏。
+    </p>
+    <p>
+      <strong>过拟合（高方差）：</strong>模型太复杂，把噪声也当成了规律。
+      d=12 时曲线精确穿过每一个点，但在点与点之间疯狂震荡，
+      换一批新数据就完全失效。
+    </p>
+    <p>
+      <strong>最佳容量</strong>在两者之间。而且注意：<em>随着数据量增加，最佳容量也会变大</em>。
+      这解释了为什么大模型需要海量数据——参数量和数据量必须匹配增长。
+    </p>
+  </div>
+
+  <h2>6.6 数据划分：一个必须做对的前提</h2>
+
+  <p>
+    上面演示里的「测试误差」是在一批模型<strong>从未见过</strong>的数据上测的。
+    这是所有评估的前提。如果划分做错了，你测出来的所有数字都是假的。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>集合</th><th>比例</th><th>用途</th><th>能用它调参吗</th></tr></thead>
+      <tbody>
+        <tr><td><strong>训练集</strong></td><td>70~98%</td><td>更新参数</td><td>可以</td></tr>
+        <tr><td><strong>验证集</strong></td><td>1~15%</td><td>选超参数、早停、模型选择</td><td>可以（间接）</td></tr>
+        <tr><td><strong>测试集</strong></td><td>1~15%</td><td>最终评估，报告结果</td><td><strong style="color:var(--danger)">绝对不可以</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>三个会让你前功尽弃的错误</div>
+    <p>
+      <strong>1. 数据泄漏。</strong>归一化时用了全量数据的均值方差，
+      或者用未来数据预测过去。这会让验证指标虚高，上线后一败涂地。
+      正确做法：<em>统计量只能在训练集上算</em>。
+    </p>
+    <p>
+      <strong>2. 同一实体的样本被分到不同集合。</strong>同一个用户的多次行为、
+      同一篇文章的多个段落、同一张图的不同裁剪版本——
+      这些高度相关的样本如果同时出现在训练和验证集里，验证指标会严重虚高。
+      要按<strong>实体</strong>而不是按样本来划分。
+    </p>
+    <p>
+      <strong>3. 反复用测试集调参。</strong>你每看一次测试集结果并据此调整，
+      测试集就变成了一部分验证集。看得多了，它就不再是「没见过」的数据了。
+      这也是为什么 Kaggle 比赛后期排行榜会失效。
+    </p>
+  </div>
+
+  <h2>6.7 一套系统的调试方法论</h2>
+
+  <p>
+    面对一个不工作的模型，不要随机试参数。按下面的顺序走，
+    每一步都能<strong>排除掉一大类可能</strong>：
+  </p>
+
+  <ol class="steps">
+    <li>
+      <strong>先让模型能过拟合一个小数据集</strong>
+      <p>
+        取 10~100 个样本，关掉所有正则化，训练几千步。
+        <strong>如果它连这几个样本都记不住，说明代码有 bug</strong>——
+        而不是超参数问题。这一步能排除掉 80% 的实现错误。
+      </p>
+    </li>
+    <li>
+      <strong>检查数据管道</strong>
+      <p>
+        把输入可视化出来看看。标签对不对？归一化合理吗？有没有全黑的图？
+        有没有标签错位的偏移？数据问题比模型问题常见得多。
+      </p>
+    </li>
+    <li>
+      <strong>检查初始化时的损失</strong>
+      <p>
+        10 分类任务，随机初始化时损失应该约等于 $\ln(10) \approx 2.3$。
+        如果差很多，说明输出层或损失函数写错了。
+      </p>
+    </li>
+    <li>
+      <strong>做学习率扫描</strong>
+      <p>
+        从 $10^{-7}$ 开始，每步乘以 1.1，画损失曲线。
+        找到损失开始上升的学习率，除以 10 使用。
+      </p>
+    </li>
+    <li>
+      <strong>看梯度</strong>
+      <p>
+        每一层的梯度范数是多少？是不是有层梯度为 0（神经元死亡）？
+        是不是某层梯度特别大（梯度爆炸）？这是最直接的诊断信号。
+      </p>
+    </li>
+    <li>
+      <strong>再看损失曲线形状</strong>
+      <p>
+        两条曲线一起看：训练损失和验证损失。
+        都高 → 欠拟合；训练低验证高 → 过拟合；
+        两条都剧烈震荡 → 学习率或批量问题。
+      </p>
+    </li>
+    <li>
+      <strong>最后才调超参数</strong>
+      <p>
+        按影响力排序：<strong>学习率 &gt; 批量大小 &gt; 模型规模 &gt; 正则化强度 &gt; 其他</strong>。
+        不要同时改多个，否则你不知道是哪个起了作用。
+      </p>
+    </li>
+  </ol>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>这条原则值得纹在手上</div>
+    <p>
+      <strong>先让模型在一个极小数据集上过拟合，再谈别的。</strong>
+    </p>
+    <p>
+      这是 Andrej Karpathy 反复强调的「训练前先验证」原则。
+      一个能过拟合 10 个样本的模型，至少证明：前向传播、损失函数、反向传播、
+      参数更新这四件事都是对的。剩下的才是超参数和数据的问题。
+    </p>
+  </div>
+
+  <h2>6.8 完整配置示例</h2>
+
+  <p>把这一章的东西合起来，一个现代视觉模型的训练配置大概长这样：</p>
+
+  <div class="codeblock" data-lang="python" data-title="train_config.py — 一份可以直接用的配置">
+<script type="text/dlcode">
+import torch
+import torch.nn as nn
+
+model = ResNet18(num_classes=10).apply(init_weights)
+
+# ---- 优化器：AdamW ----
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=3e-4,                 # 峰值学习率
+    betas=(0.9, 0.999),
+    weight_decay=0.05,       # 权重衰减，相当于 L2 正则
+)
+
+# ---- 学习率调度：warmup + cosine ----
+EPOCHS, WARMUP = 100, 5
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=3e-4,
+    epochs=EPOCHS,
+    steps_per_epoch=len(train_loader),
+    pct_start=WARMUP / EPOCHS,   # 前 5% 用来 warmup
+    anneal_strategy='cos',
+)
+
+# ---- 损失：标签平滑 ----
+criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+best_val, patience, bad_epochs = float('inf'), 10, 0
+
+for epoch in range(EPOCHS):
+    # ========== 训练 ==========
+    model.train()
+    for x, y in train_loader:
+        x, y = x.cuda(), y.cuda()
+
+        optimizer.zero_grad(set_to_none=True)   # 清空梯度（别忘了！）
+        loss = criterion(model(x), y)
+        loss.backward()
+
+        # 梯度裁剪，防止偶发的梯度爆炸
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        scheduler.step()
+
+    # ========== 验证 ==========
+    model.eval()                                 # 切换 Dropout / BatchNorm 行为
+    val_loss, correct = 0.0, 0
+    with torch.no_grad():                        # 推理时不需要计算图，省显存
+        for x, y in val_loader:
+            x, y = x.cuda(), y.cuda()
+            out = model(x)
+            val_loss += criterion(out, y).item()
+            correct += (out.argmax(1) == y).sum().item()
+    val_loss /= len(val_loader)
+
+    print(f"epoch {epoch:3d}  val_loss {val_loss:.4f}  acc {correct/len(val_set):.4f}")
+
+    # ========== 早停 ==========
+    if val_loss < best_val:
+        best_val, bad_epochs = val_loss, 0
+        torch.save(model.state_dict(), "best.pt")
+    else:
+        bad_epochs += 1
+        if bad_epochs >= patience:
+            print(f"验证损失 {patience} 轮没有改善，早停")
+            break
+
+model.load_state_dict(torch.load("best.pt"))     # 回滚到最好的检查点
+</script>
+  </div>
+
+  <h2>6.9 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">初始化 <small>initialization</small></div>
+      <div class="gloss__def">参数的初始取值。不能全 0，且方差要匹配激活函数（ReLU 用 He，Sigmoid 用 Xavier）。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">归一化 <small>normalization</small></div>
+      <div class="gloss__def">把每层输入拉回稳定分布。BatchNorm 跨样本，LayerNorm 跨特征，大模型用 RMSNorm。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">正则化 <small>regularization</small></div>
+      <div class="gloss__def">限制模型有效容量的手段：权重衰减、Dropout、数据增强、标签平滑、早停。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">过拟合 <small>overfitting</small></div>
+      <div class="gloss__def">训练损失低但验证损失高。模型记住了噪声而非规律。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">数据泄漏 <small>data leakage</small></div>
+      <div class="gloss__def">训练时用到了本不该知道的信息，导致评估虚高。最常见的是用全量数据算归一化统计量。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">早停 <small>early stopping</small></div>
+      <div class="gloss__def">验证损失不再改善时停止训练，并回滚到最佳检查点。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>初始化要打破对称性，并且方差要匹配激活函数。ReLU 配 He，Sigmoid 配 Xavier。</li>
+    <li>归一化让信号保持健康。BatchNorm 依赖批量，LayerNorm 不依赖，大模型用 Pre-Norm + RMSNorm。</li>
+    <li>正则化的本质是限制模型容量。数据增强最有效，早停最省事，Dropout 和权重衰减最通用。</li>
+    <li>划分数据时最危险的不是比例，而是泄漏。统计量只能在训练集上算。</li>
+    <li><strong>调试的第一原则：先让模型在一个小数据集上过拟合。</strong></li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么所有参数初始化为 0 会导致模型完全学不到东西？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为同一层里的所有神经元接收的输入完全相同，算出的输出也完全相同。
+          反向传播时它们收到的梯度也完全相同，更新之后依然完全相同。
+        </p>
+        <p>
+          这意味着 100 个神经元实际上只起到了 1 个的作用——网络容量被浪费了 99%。
+          这个现象叫「对称性破缺失败」。用随机初始化（哪怕很小的随机数）
+          就能打破对称性，让每个神经元走上不同的学习路径。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>BatchNorm 在训练和推理时行为不同，这会造成什么麻烦？</summary>
+      <div class="quiz__answer">
+        <p>
+          训练时用当前批次的均值和方差，推理时用训练期间累积的滑动平均。
+          如果你在推理时忘了调用 <code>model.eval()</code>，
+          模型就会用推理批次的统计量来归一化——而推理批次可能只有 1 个样本，
+          算出来的方差是 0，结果完全错误。
+        </p>
+        <p>
+          更隐蔽的问题是：如果训练时批量很小（比如 2），滑动平均本身就不准，
+          推理时用这个不准的统计量，效果会明显下降。
+          这也是为什么小批量场景要用 GroupNorm 或 LayerNorm。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>Dropout 里的 <code>/(1-p)</code> 是干什么的？</summary>
+      <div class="quiz__answer">
+        <p>
+          保持期望不变。假设某个神经元的输出是 $x$，以概率 $p$ 被置零。
+          那么输出的期望是 $(1-p)\cdot x + p \cdot 0 = (1-p)x$，
+          比原来小了。
+        </p>
+        <p>
+          除以 $(1-p)$ 之后，被保留的神经元输出变成 $x/(1-p)$，
+          期望回到 $(1-p) \cdot x/(1-p) = x$，和推理时一致。
+          这样就不需要在推理阶段做任何调整，代码更干净。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>训练损失一直在降，验证损失却在涨。你该做什么？</summary>
+      <div class="quiz__answer">
+        <p>
+          这是典型的过拟合信号。按性价比排序的处理方式：
+        </p>
+        <p>
+          <strong>① 加数据</strong>（最有效，但常常做不到）；
+          <strong>② 加数据增强</strong>（几乎免费，优先考虑）；
+          <strong>③ 加正则化</strong>（提高 Dropout 比例、增大权重衰减）；
+          <strong>④ 减小模型</strong>（参数越少越不容易背噪声）；
+          <strong>⑤ 早停</strong>（立刻见效，回滚到验证损失最低的检查点）。
+        </p>
+        <p>
+          注意：不要用训练损失来决定何时停止。它几乎总是单调下降的，
+          盯着它只会让你错过最佳的停止时机。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>有人报告 99% 的准确率，但你觉得有问题。你会先检查什么？</summary>
+      <div class="quiz__answer">
+        <p>
+          先查<strong>数据泄漏</strong>，这是虚高指标的头号来源。具体查三件事：
+        </p>
+        <p>
+          ① <strong>归一化统计量</strong>是不是在包含验证集的全部数据上算的？
+          ② <strong>同一实体</strong>的样本有没有被拆到训练和验证集两边？
+          ③ <strong>特征里有没有包含标签信息</strong>（比如用「是否已购买」预测「是否购买」）？
+        </p>
+        <p>
+          另一个常见原因是<strong>类别极度不平衡</strong>：如果负样本占 99%，
+          一个永远输出「负」的模型也能拿到 99% 准确率。
+          这时候要看混淆矩阵、F1 或 AUC，而不是准确率。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    第二部到此结束。你现在已经完整掌握了「通用神经网络」的全部知识：
+    结构、损失、梯度、优化、正则化。
+  </p>
+
+  <p>
+    但从下一章开始，我们要讨论一个前面一直回避的问题：
+    <strong>全连接层是不是浪费？</strong>
+    一张 224×224 的彩色图片有 15 万个像素，如果接一个 1000 个神经元的全连接层，
+    参数量就是 1.5 亿——而它连「图片往右平移一格还是同一只猫」这件事都不知道。
+  </p>
+
+  <p>
+    第三部讲的是「把先验知识写进结构」：卷积网络如何利用图像的空间局部性，
+    RNN 如何利用序列的时间顺序。理解它们，才能理解 Transformer 为什么要推翻它们。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

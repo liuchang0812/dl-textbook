@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 12 章 · 大模型预训练 — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="12">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 12 章 · 第五部 大模型工程</span>
+    <h1>大模型预训练</h1>
+    <p class="chapter-head__lead">
+      原理讲完了，现在讲怎么真的把它训出来。
+      几万张 GPU 连续跑几个月、电费上千万美元、中间任何一个环节出错都可能前功尽弃——
+      这一章讲的是那些论文里不写、但决定成败的工程细节：
+      数据清洗、并行策略、混合精度、训练稳定性。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 30 分钟</span>
+      <span>🎯 理解大规模训练的工程全貌</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>12.1 预训练在做什么</h2>
+
+  <p>
+    前面几章讲的都是「模型长什么样」。预训练要回答的是另一个问题：
+    <strong>怎么让这个模型在几万亿 token 上把参数调好。</strong>
+  </p>
+
+  <p>整个流程可以压缩成四步，和你在笔记本上训练 MNIST 没有本质区别：</p>
+
+  <ol class="steps">
+    <li>
+      <strong>准备数据</strong>
+      <p>从互联网抓取几十 TB 的文本，清洗、去重、过滤、配比，变成 token 序列。</p>
+    </li>
+    <li>
+      <strong>初始化模型</strong>
+      <p>随机初始化几千亿个参数，分散到几千张 GPU 上。</p>
+    </li>
+    <li>
+      <strong>反复迭代</strong>
+      <p>取一个批次 → 前向传播 → 算交叉熵损失 → 反向传播 → 更新参数。
+      重复几百万次。</p>
+    </li>
+    <li>
+      <strong>保存检查点</strong>
+      <p>定期保存模型权重。如果训练崩了，从这里恢复。</p>
+    </li>
+  </ol>
+
+  <p>
+    区别只在于<strong>规模</strong>。而规模一旦大到某个程度，所有工程问题都会从「小事」
+    变成「核心难题」：显存不够、通信瓶颈、数值溢出、训练崩溃……
+    这一章讲的就是怎么对付它们。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">预训练 vs 微调</div>
+    <p>
+      <strong>预训练</strong>：在海量通用数据上从零训练，让模型学会语言的统计规律。
+      成本极高（千万到亿美元），通常只有少数机构做。
+    </p>
+    <p>
+      <strong>微调</strong>：在预训练模型的基础上，用少量领域数据继续训练。
+      成本低（几十到几千美元），任何人都能做。
+    </p>
+    <p>
+      这个分工是开源生态能够繁荣的前提：大机构负责昂贵的预训练，
+      社区在开源权重上做各种应用。第 15 章会详细讲微调。
+    </p>
+  </div>
+
+  <h2>12.2 数据：决定上限的那件事</h2>
+
+  <p>
+    这是最容易被低估的环节。很多人以为大模型的难点在架构和算力，
+    但实际上<strong>数据质量往往决定了一个模型的上限</strong>。
+  </p>
+
+  <h3>数据从哪里来</h3>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>来源</th><th>典型占比</th><th>特点</th></tr></thead>
+      <tbody>
+        <tr><td><strong>网页抓取</strong>（CommonCrawl）</td><td>60~80%</td><td>量最大，但质量参差，需要重度清洗</td></tr>
+        <tr><td><strong>代码</strong>（GitHub）</td><td>5~15%</td><td>显著提升推理能力，被证实非常有效</td></tr>
+        <tr><td><strong>书籍</strong></td><td>3~10%</td><td>长文本、高质量，对长上下文能力关键</td></tr>
+        <tr><td><strong>学术论文</strong>（arXiv）</td><td>2~5%</td><td>提升专业领域能力</td></tr>
+        <tr><td><strong>问答与百科</strong></td><td>2~5%</td><td>事实密度高，提升准确性</td></tr>
+        <tr><td><strong>多语言数据</strong></td><td>视目标而定</td><td>提升非英语能力，但要注意配比</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>清洗流水线</h3>
+
+  <p>原始网页文本里充满了噪声。一条典型的清洗流水线包含这些步骤：</p>
+
+  <div class="codeblock" data-lang="python" data-title="数据清洗的核心步骤（简化版）">
+<script type="text/dlcode">
+def clean_pipeline(documents):
+    for doc in documents:
+        # 1) 提取正文：去掉 HTML 标签、导航栏、广告、页脚
+        text = extract_main_content(doc)
+
+        # 2) 语言过滤：用轻量分类器判断语种，只保留目标语言
+        if lang_detect(text) not in TARGET_LANGS:
+            continue
+
+        # 3) 质量过滤：一堆启发式规则
+        if len(text) < 200:                       continue  # 太短
+        if not has_enough_punctuation(text):      continue  # 不像自然语言
+        if too_many_repeated_lines(text):         continue  # 导航栏残留
+        if ratio_of_symbols(text) > 0.3:          continue  # 乱码
+        if not passes_quality_classifier(text):   continue  # 训练一个分类器打分
+
+        # 4) 去重（最重要的一步！）
+        #    精确去重：整篇文本的哈希
+        #    模糊去重：MinHash / SimHash 找近似重复的段落
+        if is_duplicate(text):
+            continue
+
+        # 5) 隐私清洗：去掉邮箱、电话、身份证号
+        text = remove_pii(text)
+
+        yield text
+</script>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>为什么去重如此关键</div>
+    <p>
+      互联网上大量内容是重复的：转载的新闻、镜像的文档、模板生成的页面。
+      如果不去重，模型会在这些内容上反复训练，产生三个严重后果：
+    </p>
+    <p>
+      <strong>① 记忆化。</strong>模型会逐字背下这些内容，然后原样吐出来——
+      这既是版权风险，也是隐私风险。
+    </p>
+    <p>
+      <strong>② 训练效率降低。</strong>重复数据不提供新信息，白白消耗算力。
+      有研究估计，低质量的重复数据能让有效训练效率下降一半以上。
+    </p>
+    <p>
+      <strong>③ 分布偏移。</strong>如果某个网站被转载了一万次，
+      模型会以为这个世界「一万倍地关心这个话题」。
+    </p>
+    <p>
+      实践中，去重通常能删掉<strong>30%~70%</strong> 的原始数据。
+      这不是浪费，而是净化。
+    </p>
+  </div>
+
+  <h3>数据配比：一个没有标准答案的问题</h3>
+
+  <p>
+    各来源数据应该按什么比例混合？这个问题至今没有理论答案，
+    只能靠实验。但有一些经验规律：
+  </p>
+
+  <ul>
+    <li><strong>代码数据要「超配」。</strong>代码在原始数据里占比很低（不到 5%），
+      但实验表明把比例提高到 10%~15% 能显著提升推理和逻辑能力。
+      因为代码是「结构化、有明确因果链」的文本。</li>
+    <li><strong>高质量数据要「重复使用」。</strong>高质量数据（书籍、论文）总量少，
+      但可以训练多个 epoch。不过重复超过 4 个 epoch 后收益就急剧衰减。</li>
+    <li><strong>配比会影响「性格」。</strong>多语言数据占比高，中文能力好；
+      代码占比高，逻辑能力强但语言可能变「干」。这是权衡，不是优化。</li>
+  </ul>
+
+  <h2>12.3 需要多少算力？</h2>
+
+  <p>
+    这是每个想做预训练的人第一个要算的账。有个非常好用的估算公式：
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">训练算力估算</div>
+    <p>$$C \approx 6 \times N \times D$$</p>
+    <p>
+      $N$ 是参数量，$D$ 是训练 token 数，$C$ 是总浮点运算次数（FLOPs）。
+    </p>
+    <p>
+      为什么是 6？因为<strong>前向传播是 $2N$</strong>（每个参数一次乘法一次加法），
+      <strong>反向传播是 $4N$</strong>（算对输入的梯度和对权重的梯度各 $2N$）。
+      加起来 $6N$，再乘上 token 数 $D$。
+    </p>
+  </div>
+
+  <p>
+    这个公式极其有用。用下面的计算器自己算一算，感受一下量级：
+  </p>
+
+  <div class="widget" data-widget="compute">
+    <div class="widget__head"><span class="tag">交互 16</span>训练算力与成本估算</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">参数量 N（十亿）</span><span class="ctrl__val" data-v="N">175</span></div>
+            <input type="range" data-p="N" min="1" max="500" step="1" value="175">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">训练 token D（十亿）</span><span class="ctrl__val" data-v="D">300</span></div>
+            <input type="range" data-p="D" min="10" max="20000" step="10" value="300">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">GPU 数量</span><span class="ctrl__val" data-v="G">1,024</span></div>
+            <input type="range" data-p="G" min="8" max="32768" step="8" value="1024">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">MFU（算力利用率）</span><span class="ctrl__val" data-v="mfu">40%</span></div>
+            <input type="range" data-p="mfu" min="15" max="65" step="1" value="40">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">GPU 单价（美元/小时）</span><span class="ctrl__val" data-v="price">2</span></div>
+            <input type="range" data-p="price" min="1" max="10" step="0.5" value="2">
+          </div>
+          <div class="btnrow">
+            <button class="btn" data-gpu="312" aria-pressed="false">A100 (312 TFLOPS)</button>
+            <button class="btn" data-gpu="989" aria-pressed="true">H100 (989 TFLOPS)</button>
+          </div>
+          <div class="btnrow" style="margin-top:.5rem">
+            <button class="btn" data-preset="gpt2">GPT-2</button>
+            <button class="btn" data-preset="gpt3">GPT-3</button>
+            <button class="btn" data-preset="llama">LLaMA-7B</button>
+            <button class="btn" data-preset="chin">Chinchilla</button>
+            <button class="btn" data-preset="big">400B 级</button>
+          </div>
+        </div>
+        <div>
+          <div class="bars" data-role="bars" style="margin-bottom:.9rem"></div>
+          <div class="readout" data-role="info"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        注意 MFU（Model FLOPs Utilization）这个参数——它是「实际达到的算力 / 理论峰值算力」。
+        大模型训练中能到 40%~55% 就已经是很优秀的水平了。
+        剩下的算力都消耗在通信、内存带宽、流水线气泡上。
+        <strong>优化 MFU 是预训练工程的核心工作之一。</strong>
+      </p>
+    </div>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>用这个公式感受一下量级</div>
+    <p>
+      GPT-3：$6 \times 175\times10^9 \times 300\times10^9 = 3.15 \times 10^{23}$ FLOPs。
+    </p>
+    <p>
+      一张 H100 的 bf16 峰值是 $989 \times 10^{12}$ FLOPS，按 40% 利用率算是
+      $4 \times 10^{14}$ FLOPS。所以需要
+      $3.15\times10^{23} / 4\times10^{14} = 7.9\times10^8$ 秒 = 约 9130 GPU·天。
+      用 1024 张卡，大约 9 天。
+    </p>
+    <p>
+      但实际上 GPT-3 的训练花了更久——因为<strong>规模越大，并行效率越低</strong>，
+      通信开销、失败重试、调试都会吃掉大量时间。真实的工程复杂度远高于这个估算。
+    </p>
+  </div>
+
+  <h2>12.4 并行策略：把模型塞进几万张卡</h2>
+
+  <p>
+    一个 175B 的模型，光是 fp16 权重就有 350 GB，加上优化器状态是 1.4 TB。
+    没有任何一张 GPU 装得下。必须把模型和数据切开放到几千张卡上。
+  </p>
+
+  <p>这就是所谓的「3D 并行」，包含三种正交的切分方式：</p>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 300" role="img" aria-label="三种并行策略的对比">
+      <!-- 数据并行 -->
+      <text x="10" y="20" font-size="12" font-weight="700" fill="var(--brand)" font-family="sans-serif">① 数据并行 Data Parallel</text>
+      <text x="10" y="38" font-size="10.5" fill="var(--ink-3)" font-family="sans-serif">每张卡有完整模型，各处理一部分数据</text>
+      <g>
+        <rect x="10" y="48" width="150" height="52" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="85" y="68" font-size="10.5" fill="var(--brand)" text-anchor="middle" font-family="sans-serif">GPU 0</text>
+        <text x="85" y="86" font-size="9.5" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">完整模型 + 数据分片 A</text>
+        <rect x="10" y="110" width="150" height="52" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="85" y="130" font-size="10.5" fill="var(--brand)" text-anchor="middle" font-family="sans-serif">GPU 1</text>
+        <text x="85" y="148" font-size="9.5" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">完整模型 + 数据分片 B</text>
+      </g>
+      <text x="85" y="182" font-size="10" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">每步结束要 all-reduce 同步梯度</text>
+      <text x="85" y="200" font-size="10" fill="var(--danger)" text-anchor="middle" font-family="sans-serif">⚠ 显存不省，只是更快</text>
+
+      <!-- 张量并行 -->
+      <text x="196" y="20" font-size="12" font-weight="700" fill="var(--violet)" font-family="sans-serif">② 张量并行 Tensor Parallel</text>
+      <text x="196" y="38" font-size="10.5" fill="var(--ink-3)" font-family="sans-serif">把每一层的矩阵切开放到不同卡</text>
+      <g>
+        <rect x="196" y="48" width="150" height="52" rx="7" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="271" y="68" font-size="10.5" fill="var(--violet)" text-anchor="middle" font-family="sans-serif">GPU 0</text>
+        <text x="271" y="86" font-size="9.5" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">W 的左半部分</text>
+        <rect x="196" y="110" width="150" height="52" rx="7" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="271" y="130" font-size="10.5" fill="var(--violet)" text-anchor="middle" font-family="sans-serif">GPU 1</text>
+        <text x="271" y="148" font-size="9.5" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">W 的右半部分</text>
+      </g>
+      <text x="271" y="182" font-size="10" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">每一层都要通信，带宽要求极高</text>
+      <text x="271" y="200" font-size="10" fill="var(--ok)" text-anchor="middle" font-family="sans-serif">✓ 省显存，但只适合单机内</text>
+
+      <!-- 流水并行 -->
+      <text x="382" y="20" font-size="12" font-weight="700" fill="var(--accent)" font-family="sans-serif">③ 流水并行 Pipeline Parallel</text>
+      <text x="382" y="38" font-size="10.5" fill="var(--ink-3)" font-family="sans-serif">把不同的层放到不同卡</text>
+      <g>
+        <rect x="382" y="48" width="150" height="34" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+        <text x="457" y="69" font-size="10" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">GPU 0：第 1-8 层</text>
+        <rect x="382" y="90" width="150" height="34" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+        <text x="457" y="111" font-size="10" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">GPU 1：第 9-16 层</text>
+        <rect x="382" y="132" width="150" height="34" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+        <text x="457" y="153" font-size="10" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">GPU 2：第 17-24 层</text>
+      </g>
+      <text x="457" y="182" font-size="10" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">像流水线一样传递激活值</text>
+      <text x="457" y="200" font-size="10" fill="var(--ok)" text-anchor="middle" font-family="sans-serif">✓ 通信少，但有"气泡"等待</text>
+    </svg>
+    <div class="figure__caption">
+      <b>3D 并行。</b>真实训练把三种方式组合起来：
+      例如 8 路张量并行（单机内）× 16 路流水并行（跨机）× 32 路数据并行 = 4096 张卡。
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>策略</th><th>切什么</th><th>通信量</th><th>通信频率</th><th>适合的网络</th></tr></thead>
+      <tbody>
+        <tr><td><strong>数据并行</strong></td><td>数据</td><td>梯度大小（大）</td><td>每步一次</td><td>任何</td></tr>
+        <tr><td><strong>张量并行</strong></td><td>层内权重</td><td>激活值（中）</td><td>每层两次</td><td>节点内 NVLink</td></tr>
+        <tr><td><strong>流水并行</strong></td><td>层</td><td>激活值（小）</td><td>每层边界</td><td>跨节点</td></tr>
+        <tr><td><strong>ZeRO</strong></td><td>优化器状态/梯度/权重</td><td>中等</td><td>每步多次</td><td>任何（DeepSpeed）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>ZeRO：不切模型，切状态</h3>
+
+  <p>
+    数据并行的问题是每张卡都要存一份完整的<strong>优化器状态</strong>。
+    还记得第 4 章讲的吗？AdamW 为每个参数存两份同样大小的张量。
+    所以一个 fp16 的 7B 模型：
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>组成部分</th><th>精度</th><th>7B 模型的显存</th></tr></thead>
+      <tbody>
+        <tr><td>模型权重</td><td>fp16</td><td>14 GB</td></tr>
+        <tr><td>梯度</td><td>fp16</td><td>14 GB</td></tr>
+        <tr><td>Adam 一阶矩 $m$</td><td>fp32</td><td>28 GB</td></tr>
+        <tr><td>Adam 二阶矩 $v$</td><td>fp32</td><td>28 GB</td></tr>
+        <tr><td>fp32 主权重副本</td><td>fp32</td><td>28 GB</td></tr>
+        <tr><td><strong>合计</strong></td><td></td><td><strong>约 112 GB</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    一张 H100 只有 80 GB，装不下。ZeRO 的思路是：
+    <strong>模型权重本来就在每张卡上冗余存了 N 份，那优化器状态为什么也要冗余？</strong>
+    把它们切成 N 份，每张卡只负责一份，需要时再通信获取。
+  </p>
+
+  <ul>
+    <li><strong>ZeRO-1：</strong>切优化器状态。显存降到约 1/4。</li>
+    <li><strong>ZeRO-2：</strong>再切梯度。降到约 1/8。</li>
+    <li><strong>ZeRO-3：</strong>再切权重。降到约 1/N，但通信量大幅增加。</li>
+  </ul>
+
+  <p>
+    PyTorch 官方的 <code>FSDP</code>（Fully Sharded Data Parallel）就是 ZeRO-3 的等价实现。
+    它是目前最主流的方案，配置简单，和普通 <code>DistributedDataParallel</code> 的代码几乎一样。
+  </p>
+
+  <h2>12.5 混合精度：用一半的显存做同样的事</h2>
+
+  <p>
+    fp32 有 23 位尾数，精度远超训练所需。用 fp16/bf16 能把显存和带宽都减半，
+    在支持张量核心的 GPU 上速度还能提升 2~3 倍。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>格式</th><th>位数</th><th>指数位</th><th>尾数位</th><th>范围</th><th>特点</th></tr></thead>
+      <tbody>
+        <tr><td>fp32</td><td>32</td><td>8</td><td>23</td><td>±3.4e38</td><td>基准，精度最高</td></tr>
+        <tr><td>fp16</td><td>16</td><td>5</td><td>10</td><td>±65504</td><td>精度好但范围窄，<strong>容易溢出</strong></td></tr>
+        <tr><td><strong>bf16</strong></td><td>16</td><td>8</td><td>7</td><td>±3.4e38</td><td>范围和 fp32 一样，精度略低。<strong>训练首选</strong></td></tr>
+        <tr><td>fp8</td><td>8</td><td>4~5</td><td>2~3</td><td>很小</td><td>H100 支持，需要精细的缩放策略</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    bf16 和 fp16 都是 16 位，但 bf16 把更多的位给了指数——这让它的数值范围
+    和 fp32 完全一致，几乎不会溢出。代价是精度低一些（7 位尾数 vs 10 位）。
+    对神经网络来说，<strong>范围比精度重要得多</strong>，所以现在训练几乎都用 bf16。
+  </p>
+
+  <h3>损失缩放：fp16 的救命稻草</h3>
+
+  <p>
+    如果你必须用 fp16（比如在老的 V100 上），会遇到一个问题：
+    反向传播算出的梯度往往非常小（比如 $10^{-8}$），
+    而 fp16 能表示的最小正数约 $6\times10^{-8}$，直接下溢成 0。
+  </p>
+
+  <p>解法是<strong>损失缩放</strong>：把损失乘以一个大常数（比如 1024），梯度就跟着放大了；</p>
+
+  <div class="codeblock" data-lang="python" data-title="梯度缩放的核心逻辑">
+<script type="text/dlcode">
+scaler = torch.cuda.amp.GradScaler()
+
+for x, y in loader:
+    with torch.autocast(device_type='cuda', dtype=torch.float16):
+        loss = criterion(model(x), y)
+
+    # 1) 反向传播前把 loss 放大 scale 倍
+    scaler.scale(loss).backward()
+
+    # 2) 先把梯度缩回去，再检查有没有 inf/nan
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+    # 3) 如果没有溢出就更新；溢出了就跳过这一步并减小 scale
+    scaler.step(optimizer)
+    scaler.update()
+
+    optimizer.zero_grad(set_to_none=True)
+</script>
+  </div>
+
+  <p>
+    注意 <code>scaler.update()</code>：如果某一步梯度溢出，它会<strong>自动把 scale 减半</strong>；
+    如果连续多步没溢出，又会慢慢增大。这是一个自适应的机制，
+    让你不用手动调这个「放大倍数」。
+  </p>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>为什么用 bf16 就不需要损失缩放？</div>
+    <p>
+      因为 bf16 的指数位和 fp32 一样是 8 位，能表示的最小正数约 $10^{-38}$。
+      梯度再小也不会下溢。所以用 bf16 时可以直接 <code>loss.backward()</code>，
+      不需要 GradScaler。代码更简单，也更不容易出错。
+    </p>
+    <p>
+      这就是为什么「新卡上无脑用 bf16」已经成了默认实践。
+    </p>
+  </div>
+
+  <h2>12.6 训练稳定性：几千万美元的赌博</h2>
+
+  <p>
+    大模型训练最让人心惊肉跳的时刻是：跑到第 40 天，损失曲线突然开始上升，
+    然后变成 <code>nan</code>。几千张 GPU 白跑了。
+  </p>
+
+  <p>常见的崩溃模式和对策：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>症状</th><th>可能原因</th><th>对策</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>损失突然飙升然后 nan</td>
+          <td>某个批次的梯度爆炸；数据里有异常样本</td>
+          <td>梯度裁剪（必须做）；跳过异常批次；回滚到上一个检查点并跳过这段数据</td>
+        </tr>
+        <tr>
+          <td>损失缓慢上升</td>
+          <td>学习率太大；权重衰减过强</td>
+          <td>降低学习率；检查学习率调度</td>
+        </tr>
+        <tr>
+          <td>损失震荡不下</td>
+          <td>批量太小；学习率太大</td>
+          <td>增大全局批量（用梯度累积）；降低学习率</td>
+        </tr>
+        <tr>
+          <td>损失卡住不动</td>
+          <td>死神经元；梯度为 0；数据有问题</td>
+          <td>换激活函数；检查梯度范数；检查数据管道</td>
+        </tr>
+        <tr>
+          <td>注意力 logits 爆炸</td>
+          <td>softmax 饱和；数值不稳定</td>
+          <td>用 QK-Norm；在注意力分数上加 softcap</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>大型训练的三个必备习惯</div>
+    <p>
+      <strong>1. 频繁保存检查点。</strong>每几百步存一次，
+      并且保留最近几个。崩溃时能回滚，最多损失几十分钟。
+      检查点还要<strong>异步保存</strong>到分布式存储，否则保存本身就会阻塞训练。
+    </p>
+    <p>
+      <strong>2. 全程监控梯度范数。</strong>它是训练健康度最直接的指标。
+      正常情况下它应该平稳波动；如果突然增大 10 倍，说明有异常，要立刻告警。
+    </p>
+    <p>
+      <strong>3. 准备好「跳过数据」的能力。</strong>如果确定是某一段数据导致崩溃，
+      能在重启后从它后面继续。这个看似丑陋的工程手段，在真实训练中救过无数个项目。
+    </p>
+  </div>
+
+  <h2>12.7 成本账</h2>
+
+  <p>
+    最后算一笔账。一个中等规模（比如 70B 参数、1.4T token）的预训练：
+  </p>
+
+  <ul>
+    <li><strong>算力：</strong>约 $6 \times 70\times10^9 \times 1.4\times10^{12} = 5.9\times10^{23}$ FLOPs。
+      按 H100 40% MFU 计算，约 4.1 万 GPU·天。用 1024 张卡跑 40 天。</li>
+    <li><strong>租用成本：</strong>按 2 美元 / GPU·h 计算，约 200 万美元。
+      如果自建集群，硬件采购约 3000 万美元（1024 张 H100 加网络和机房）。</li>
+    <li><strong>失败的实验：</strong>至少要乘 2~3 倍。没人能一次成功。</li>
+    <li><strong>人力：</strong>一支 10~30 人的团队，半年到一年。</li>
+    <li><strong>数据：</strong>清洗流水线、存储、版权合规，也是数百万美元级别。</li>
+  </ul>
+
+  <p>
+    所以「训练一个自己的大模型」的入门门槛在<strong>千万美元</strong>级别。
+    这也解释了为什么开源模型如此珍贵——它把几千万美元的成本分摊给了所有人。
+  </p>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>那普通人能做什么？</div>
+    <p>
+      好消息是：<strong>你几乎不需要从零预训练</strong>。
+    </p>
+    <p>
+      · 想做应用 → 直接用 API 或开源权重，配合提示工程（第 16 章）和 RAG（第 17 章）<br>
+      · 想要领域能力 → 微调一个开源模型，成本几十到几千美元（第 15 章）<br>
+      · 想省钱 → 自己部署开源模型，一张消费级显卡就能跑 7B（第 14 章）<br>
+      · 想做研究 → 在小规模上验证想法，再申请大机构的算力
+    </p>
+    <p>
+      预训练的工程细节值得了解，是为了让你理解「模型的边界在哪里」，
+      而不是为了让你去重复它。
+    </p>
+  </div>
+
+  <h2>12.8 一个最小可用的预训练循环</h2>
+
+  <div class="codeblock" data-lang="python" data-title="pretrain.py — 预训练的核心循环">
+<script type="text/dlcode">
+import torch
+import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+def train(model, dataloader, total_steps, device):
+    # ---- 1. 优化器：AdamW，分组设置权重衰减 ----
+    decay, no_decay = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        # 归一化层和偏置不做权重衰减（它们不是"特征权重"）
+        (no_decay if p.ndim <= 1 else decay).append(p)
+    optimizer = torch.optim.AdamW([
+        {'params': decay,    'weight_decay': 0.1},
+        {'params': no_decay, 'weight_decay': 0.0},
+    ], lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+
+    # ---- 2. 学习率调度：warmup + cosine ----
+    warmup = int(0.02 * total_steps)
+    def lr_at(step):
+        if step < warmup:
+            return step / max(1, warmup)                    # 线性预热
+        prog = (step - warmup) / max(1, total_steps - warmup)
+        return 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * prog))   # 余弦退火到 10%
+
+    model = DDP(model, device_ids=[device])
+    model.train()
+    step = 0
+    accum_steps = 8                    # 梯度累积：模拟更大的全局批量
+
+    while step < total_steps:
+        for micro, (x, y) in enumerate(dataloader):
+            x, y = x.to(device), y.to(device)
+
+            # ---- 3. 前向 + 反向（bf16 自动混合精度）----
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                _, loss = model(x, y)
+                loss = loss / accum_steps
+
+            loss.backward()
+
+            if (micro + 1) % accum_steps == 0:
+                # ---- 4. 梯度裁剪（必须做，且要在 unscale 之后）----
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+                # ---- 5. 更新参数 ----
+                for g in optimizer.param_groups:
+                    g['lr'] = 3e-4 * lr_at(step)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                step += 1
+
+                # ---- 6. 监控 ----
+                if step % 10 == 0:
+                    print(f"step {step:6d}  loss {loss.item()*accum_steps:.4f}  "
+                          f"grad_norm {grad_norm:.3f}  lr {optimizer.param_groups[0]['lr']:.2e}")
+                    if grad_norm > 100:
+                        print("⚠ 梯度异常，检查数据或降低学习率")
+
+                # ---- 7. 定期保存 ----
+                if step % 1000 == 0:
+                    save_checkpoint(model, optimizer, step, f"ckpt_{step}.pt")
+
+                if step >= total_steps:
+                    break
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>这段代码里的五个实战细节</div>
+    <p>
+      <strong>1. 权重衰减分组。</strong>归一化层的缩放参数和偏置不做衰减——
+      它们不是「特征权重」，衰减它们只会让模型表达能力变差。
+      这是几乎所有开源模型的标准做法。
+    </p>
+    <p>
+      <strong>2. <code>betas=(0.9, 0.95)</code>。</strong>
+      大模型训练常用 0.95 而不是默认的 0.999 作为 $\beta_2$。
+      因为批次大、噪声小，更快的二阶矩更新能提高对近期梯度的响应速度。
+    </p>
+    <p>
+      <strong>3. 梯度累积。</strong>显存装不下大批量时，就分多次前向反向，
+      把梯度累积起来再更新一次。数学上等价于大批量，代价是多花时间。
+    </p>
+    <p>
+      <strong>4. 学习率退火到 10% 而不是 0。</strong>
+      留一点学习率能让训练后期还有微调能力。退火到 0 有时会让模型卡在次优点。
+    </p>
+    <p>
+      <strong>5. 每个细节都要打日志。</strong>损失、梯度范数、学习率、
+      吞吐量（tokens/秒）。训练崩溃时，这些日志是唯一的线索。
+    </p>
+  </div>
+
+  <h2>12.9 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">预训练 <small>pretraining</small></div>
+      <div class="gloss__def">在海量通用数据上从零训练模型，学习语言的一般规律。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">MFU</div>
+      <div class="gloss__def">模型算力利用率 = 实际 FLOPs / 理论峰值。大模型训练通常 40%~55%。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">数据并行 / 张量并行 / 流水并行</div>
+      <div class="gloss__def">三种正交的切分方式：切数据、切层内权重、切层。实际训练组合使用。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">ZeRO / FSDP</div>
+      <div class="gloss__def">把优化器状态、梯度、权重分片存储，让单卡能装下更大的模型。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">bf16</div>
+      <div class="gloss__def">16 位浮点，指数范围与 fp32 相同，训练时首选，无需损失缩放。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">梯度累积</div>
+      <div class="gloss__def">多次前向反向累积梯度再更新一次，用小显存模拟大批量。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>预训练的流程和训练 MNIST 没有本质区别，区别只在规模带来的工程挑战。</li>
+    <li>数据质量决定模型上限。去重是最关键也最容易被忽视的一步。</li>
+    <li>算力估算：$C \approx 6ND$。前向 $2N$，反向 $4N$。</li>
+    <li>3D 并行把模型塞进几万张卡；ZeRO/FSDP 把优化器状态分片，是最主流的省显存方案。</li>
+    <li>bf16 是训练首选；fp16 需要损失缩放，否则梯度会下溢。</li>
+    <li>大模型训练是高风险工程：必须频繁存档、监控梯度、准备跳过异常数据的能力。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么训练算力是 6ND，而不是 2ND？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为反向传播的代价大约是前向传播的两倍。
+        </p>
+        <p>
+          <strong>前向：</strong>每个参数参与一次乘法和一次加法，
+          每次运算算 2 个 FLOPs（乘 + 加），所以是 $2N$ FLOPs per token。
+        </p>
+        <p>
+          <strong>反向：</strong>需要算两类梯度——
+          对输入的梯度（用于继续往前传）和对权重的梯度（用于更新）。
+          这两者各需要约 $2N$ FLOPs，所以反向是 $4N$。
+        </p>
+        <p>
+          总计 $2N + 4N = 6N$ FLOPs per token。乘上 token 数 $D$ 就是 $6ND$。
+          这个公式简单但非常准确，误差通常在 10% 以内。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>训练 7B 模型，为什么一张 80GB 的 H100 不够？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为除了模型权重，还需要存储梯度、优化器状态和 fp32 主权重。
+        </p>
+        <p>
+          · 模型权重（bf16）：$7\times10^9 \times 2 = 14$ GB<br>
+          · 梯度（bf16）：14 GB<br>
+          · Adam 一阶矩（fp32）：28 GB<br>
+          · Adam 二阶矩（fp32）：28 GB<br>
+          · fp32 主权重：28 GB
+        </p>
+        <p>
+          合计约 <strong>112 GB</strong>，超过 80 GB。再加上激活值（反向传播要用的中间结果），
+          实际需求更大。
+        </p>
+        <p>
+          解决办法：<strong>ZeRO/FSDP</strong> 把优化器状态分片到多张卡上，
+          或者用 <strong>LoRA</strong> 只训练一小部分参数（第 15 章）。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么大模型训练用 bf16 而不是 fp16？</summary>
+      <div class="quiz__answer">
+        <p>
+          核心区别在<strong>指数位的位数</strong>：bf16 有 8 位指数，和 fp32 一样；
+          fp16 只有 5 位。
+        </p>
+        <p>
+          这意味着 fp16 能表示的数值范围是 $\pm 65504$，而 bf16 是 $\pm 3.4\times10^{38}$。
+          训练中经常出现很大或很小的中间值——比如梯度可能小到 $10^{-8}$，
+          fp16 直接下溢成 0，必须用损失缩放来救；而 bf16 完全不受影响。
+        </p>
+        <p>
+          代价是 bf16 只有 7 位尾数（fp16 有 10 位），精度略低。
+          但对神经网络来说，<strong>「不溢出」远比「精度高」重要</strong>——
+          少量的舍入误差不会影响收敛，而一次下溢就可能导致整个训练失败。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么张量并行通常只在单机内做，而流水并行可以跨机？</summary>
+      <div class="quiz__answer">
+        <p>
+          关键在于<strong>通信频率和通信量</strong>。
+        </p>
+        <p>
+          <strong>张量并行</strong>把每一层的矩阵切开，所以每一层的前向和反向
+          都需要通信（一次 all-reduce 或 all-gather）。一个 80 层的模型，
+          每步要通信 160 次以上。这要求极高的带宽和极低的延迟——
+          只有同一台机器内通过 NVLink（900 GB/s）才能满足。
+        </p>
+        <p>
+          <strong>流水并行</strong>只在不同层之间传递激活值，一个 80 层的模型切成 8 段，
+          每步只需要 7 次通信。虽然跨机的 InfiniBand（约 50 GB/s）带宽低得多，
+          但因为次数少，还能接受。
+        </p>
+        <p>
+          这也解释了为什么真实训练是「张量并行 8 路（单机内）+
+          流水并行若干路（跨机）+ 数据并行（最外层）」的组合。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>如果训练到第 40 天损失突然飙升，你会怎么做？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>第一步：立刻回滚。</strong>加载最近一个健康检查点，
+          不要试图「救」当前的状态——损失飙升通常意味着参数已经跑到了无法恢复的区域。
+        </p>
+        <p>
+          <strong>第二步：诊断。</strong>对比崩溃前后的日志：
+          梯度范数是不是突然涨了 10 倍？是某个特定的数据分片导致的吗？
+          学习率在那个时刻是不是正好在某个值？
+        </p>
+        <p>
+          <strong>第三步：针对性修复。</strong>
+          如果确认是某批数据导致，就跳过它继续训练（这是最实用的手段）；
+          如果找不到具体原因，就降低学习率、加强梯度裁剪、或者增加 warmup。
+        </p>
+        <p>
+          这也是为什么「频繁保存检查点」和「详细的日志」是大型训练的必备习惯——
+          你永远不知道什么时候会需要它们，但需要的时候它们能救回几千万美元。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    假设我们已经成功训练出了一个模型。它读了几万亿 token 的文本，
+    能流畅地续写任何句子，掌握了语法、常识和大量事实知识。
+  </p>
+
+  <p>但如果你直接和它对话，会发现它<strong>很难用</strong>：</p>
+
+  <ul>
+    <li>你问「北京在哪里」，它可能回答「上海在哪里？广州在哪里？……」——因为它在续写问题列表。</li>
+    <li>它可能会输出有害内容，因为互联网上就有这些内容。</li>
+    <li>它不知道该多长、什么语气、要不要分点。</li>
+  </ul>
+
+  <p>
+    下一章讲<strong>对齐</strong>：怎么把一个「会续写」的模型，
+    变成一个「愿意帮忙、诚实、无害」的助手。
+    这是 SFT、RLHF 和 DPO 的主题。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

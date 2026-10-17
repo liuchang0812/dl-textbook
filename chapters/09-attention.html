@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 9 章 · 注意力机制 — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="09">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 9 章 · 第四部 注意力革命</span>
+    <h1>注意力机制</h1>
+    <p class="chapter-head__lead">
+      注意力是过去十年最重要的一个算法思想。它最初的动机只是给 RNN 的瓶颈打个补丁，
+      但很快人们发现：<strong>注意力本身就能完成序列建模</strong>。
+      这一章讲清楚 Query、Key、Value 的数学形式，以及为什么一个「加权平均」能取代循环结构。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 32 分钟</span>
+      <span>🎯 能自己写出 attention 函数</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>9.1 从一个日常场景说起：查字典</h2>
+
+  <p>
+    你去图书馆找一本关于「神经网络」的书。流程是这样的：
+  </p>
+
+  <ol>
+    <li>你心里有一个<strong>需求</strong>：「我想找神经网络的书」。</li>
+    <li>每本书的封面上有一个<strong>标签</strong>：数学、物理、神经网络、烹饪……</li>
+    <li>你把需求和每个标签对比，<strong>匹配度</strong>最高的那本最相关。</li>
+    <li>最后你取出最相关的那本书的<strong>内容</strong>来读。</li>
+  </ol>
+
+  <p>把这三个角色对应到数学上，就是注意力机制的三个核心概念：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>日常概念</th><th>注意力术语</th><th>符号</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>你的需求</td><td><strong>Query</strong>（查询）</td><td>$\mathbf{q}$</td><td>「我现在想找什么」</td></tr>
+        <tr><td>书上的标签</td><td><strong>Key</strong>（键）</td><td>$\mathbf{k}_i$</td><td>「我是什么」</td></tr>
+        <tr><td>书的正文</td><td><strong>Value</strong>（值）</td><td>$\mathbf{v}_i$</td><td>「我包含什么信息」</td></tr>
+        <tr><td>匹配度</td><td><strong>注意力权重</strong></td><td>$\alpha_i$</td><td>「这本书对我有多重要」</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">注意力的一句话定义</div>
+    <p>
+      <strong>注意力就是一次「带权重的平均」：根据 Query 和每个 Key 的匹配度，
+      决定从每个 Value 里取多少信息，然后加起来。</strong>
+    </p>
+    <p>$$\text{Attention}(\mathbf{q}, \{\mathbf{k}_i\}, \{\mathbf{v}_i\}) = \sum_i \alpha_i \mathbf{v}_i$$
+    $$\alpha_i = \text{softmax}\big(\text{score}(\mathbf{q}, \mathbf{k}_i)\big)$$</p>
+  </div>
+
+  <p>
+    就这么简单。所有花哨的变体（自注意力、多头注意力、交叉注意力、FlashAttention）
+    都是在「怎么算 score」和「怎么更高效地算」上做文章。
+  </p>
+
+  <h2>9.2 为什么是「点积」</h2>
+
+  <p>
+    最关键的一步是 $\text{score}(\mathbf{q}, \mathbf{k})$ 怎么定义。常见的相似度度量有很多：
+    欧氏距离、余弦相似度、点积……Transformer 选了最简单的<strong>点积</strong>。
+  </p>
+
+  <div class="formula">
+    $$\text{score}(\mathbf{q}, \mathbf{k}_i) = \mathbf{q} \cdot \mathbf{k}_i = \sum_j q_j k_{ij}$$
+  </div>
+
+  <p>为什么是点积？三个理由：</p>
+
+  <ol>
+    <li>
+      <strong>它确实能衡量相似度。</strong>
+      $\mathbf{q}\cdot\mathbf{k} = |\mathbf{q}||\mathbf{k}|\cos\theta$。
+      两个向量方向越接近，点积越大（假设长度差不多）。
+    </li>
+    <li>
+      <strong>它可以用矩阵乘法一次算完。</strong>
+      对所有的 Key 同时算 score，就是一次 $\mathbf{Q}\mathbf{K}^\top$——
+      GPU 最擅长的操作。这一点极其重要。
+    </li>
+    <li>
+      <strong>它没有额外参数。</strong>不需要为「相似度计算」再引入一组要学的权重。
+      在超大规模模型里，任何能省的参数都很宝贵。
+    </li>
+  </ol>
+
+  <h2>9.3 为什么要除以 $\sqrt{d_k}$</h2>
+
+  <p>
+    完整的公式里有一个容易被忽略的细节：
+  </p>
+
+  <div class="formula">
+    $$\text{Attention}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \text{softmax}\!\left(\frac{\mathbf{Q}\mathbf{K}^\top}{\sqrt{d_k}}\right)\mathbf{V}$$
+    <div class="formula__caption">$d_k$ 是 Key 向量的维度。这个除法叫「缩放」（scaled dot-product）</div>
+  </div>
+
+  <p>
+    为什么要除以 $\sqrt{d_k}$？这背后是一个很实际的数值问题。
+  </p>
+
+  <p>
+    假设 $\mathbf{q}$ 和 $\mathbf{k}$ 的每个元素都是独立的、均值为 0、方差为 1 的随机变量。
+    那么点积 $\mathbf{q}\cdot\mathbf{k} = \sum_{j=1}^{d_k} q_j k_j$ 的方差是：
+  </p>
+
+  <div class="formula">
+    $$\text{Var}\!\left(\sum_{j=1}^{d_k} q_j k_j\right) = \sum_{j=1}^{d_k}\text{Var}(q_jk_j) = d_k$$
+    <div class="formula__caption">因为每项 $q_jk_j$ 的方差是 $1\cdot1 = 1$，加起来就是 $d_k$</div>
+  </div>
+
+  <p>
+    也就是说，<strong>点积的方差随维度线性增长</strong>，标准差是 $\sqrt{d_k}$。
+    $d_k = 64$ 时，点积的典型大小是 8；$d_k = 512$ 时是 22。
+  </p>
+
+  <p>
+    这为什么是问题？因为点积之后要过 softmax。而当输入值很大时，
+    softmax 会变得<strong>极其尖锐</strong>：
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="softmax 的饱和问题">
+<script type="text/dlcode">
+import numpy as np
+
+def softmax(z):
+    e = np.exp(z - z.max())
+    return e / e.sum()
+
+# 情况一：logits 尺度小
+print(softmax(np.array([1.0, 2.0, 3.0])))
+# [0.090 0.245 0.665]   ← 分布合理，梯度健康
+
+# 情况二：logits 尺度大（比如没做缩放）
+print(softmax(np.array([10.0, 20.0, 30.0])))
+# [2.06e-09 4.54e-05 9.999e-01]   ← 几乎变成 one-hot
+
+# 情况三：极端情况
+print(softmax(np.array([100.0, 200.0, 300.0])))
+# [0. 0. 1.]   ← 梯度完全消失
+</script>
+  </div>
+
+  <p>
+    当 softmax 输出接近 one-hot 时，它的<strong>梯度接近 0</strong>。
+    注意力权重变成「全押在一个位置」，其他位置的梯度传不回去，
+    模型无法学习「也许应该同时关注几个地方」。训练会变得极不稳定。
+  </p>
+
+  <p>
+    除以 $\sqrt{d_k}$ 之后，点积的方差被拉回到 1，softmax 的输入保持在合理范围，
+    梯度也就健康了。
+  </p>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>一个反直觉的事实</div>
+    <p>
+      注意力的「软」（soft）是它成功的关键。如果权重是硬的（argmax），
+      那就变成了一次「查表」，梯度没法传，也没法训练。
+    </p>
+    <p>
+      softmax 让注意力成为一个<strong>可微的、连续的选择</strong>——
+      模型可以「70% 关注这个，30% 关注那个」。
+      这种「软选择」是整个深度学习的核心思想之一，
+      它和 dropout、混合专家（MoE）是同一个哲学。
+    </p>
+  </div>
+
+  <h2>9.4 亲眼看看注意力矩阵</h2>
+
+  <p>
+    下面是一个 8 个词的句子的注意力矩阵。行是「谁在查询」，列是「被关注的对象」，
+    颜色越深表示权重越大。点击任意一行，看它的注意力分布：
+  </p>
+
+  <div class="widget" data-widget="attention">
+    <div class="widget__head"><span class="tag">交互 10</span>注意力矩阵 · 点击任意一行</div>
+    <div class="widget__body">
+      <div style="overflow-x:auto;margin-bottom:1.1rem" data-role="grid"></div>
+      <div class="bars" data-role="bars"></div>
+      <p class="widget__note" data-role="info" style="margin-top:1rem"></p>
+      <p class="widget__note">
+        句子是「小猫 坐在 垫子 上 因为 它 很 累」。
+        试着点第 6 行（「它」）——你会发现它把大部分注意力放在了「小猫」上。
+        这就是<strong>指代消解</strong>：模型自己学会了「它」指的是「小猫」。
+      </p>
+    </div>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>关于注意力可视化的一盆冷水</div>
+    <p>
+      上面的矩阵是为了讲解而手工设计的。真实模型的注意力矩阵确实常常呈现可解释的模式，
+      但<strong>不要把注意力权重直接当作「解释」</strong>。
+    </p>
+    <p>
+      多篇论文指出：注意力权重高不等于该位置对输出贡献大（因为 Value 可能接近 0），
+      而且不同的注意力头可能互相补偿。把注意力图当作模型决策的「证据」是有风险的。
+      这在第 19 章讲可解释性时会再提。
+    </p>
+  </div>
+
+  <h2>9.5 自注意力：序列内部的相互关注</h2>
+
+  <p>
+    上面讲的是「解码器查询编码器」的<strong>交叉注意力</strong>。
+    但真正革命性的想法是：<strong>让序列自己关注自己</strong>。
+  </p>
+
+  <p>
+    具体做法是：对于输入序列 $\mathbf{X}$（形状 $n \times d$，$n$ 是词数，$d$ 是维度），
+    用三个不同的线性变换把它投影成 Query、Key、Value：
+  </p>
+
+  <div class="formula">
+    $$\mathbf{Q} = \mathbf{X}\mathbf{W}_Q, \qquad \mathbf{K} = \mathbf{X}\mathbf{W}_K, \qquad \mathbf{V} = \mathbf{X}\mathbf{W}_V$$
+    <div class="formula__caption">
+      $\mathbf{W}_Q, \mathbf{W}_K, \mathbf{W}_V$ 都是可学习的参数矩阵，形状都是 $(d \times d_k)$
+    </div>
+  </div>
+
+  <p>然后就是标准流程：</p>
+
+  <div class="formula">
+    $$\text{SelfAttention}(\mathbf{X}) = \text{softmax}\!\left(\frac{\mathbf{Q}\mathbf{K}^\top}{\sqrt{d_k}}\right)\mathbf{V}$$
+  </div>
+
+  <p>
+    注意 $\mathbf{Q}\mathbf{K}^\top$ 的形状是 $(n \times d_k)(d_k \times n) = (n \times n)$。
+    这是一个<strong>方阵</strong>，第 $i$ 行第 $j$ 列就是「第 $i$ 个词对第 $j$ 个词的关注程度」。
+    这就是上一节那个矩阵的来源。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">为什么「自」注意力这么重要</div>
+    <p>
+      在没有自注意力之前，一个词要和另一个词交互，必须<strong>穿过中间的所有词</strong>——
+      信息要经过 $O(n)$ 步的传递（RNN），或者经过 $O(\log n)$ 层的堆叠（CNN）。
+    </p>
+    <p>
+      自注意力把这个路径变成了 <strong>$O(1)$</strong>：任意两个位置之间都是<strong>直接连接</strong>，
+      一步就能交换信息。
+    </p>
+    <p>
+      这解决了长距离依赖问题，也让计算可以完全并行——
+      $\mathbf{Q}\mathbf{K}^\top$ 是一次矩阵乘法，不像 RNN 必须按时间顺序一步步算。
+      <strong>「并行性」是 Transformer 能训练到万亿参数的根本原因。</strong>
+    </p>
+  </div>
+
+  <h3>复杂度：唯一的代价</h3>
+
+  <p>
+    自注意力不是没有代价的。$\mathbf{Q}\mathbf{K}^\top$ 是 $n \times n$ 的矩阵，
+    所以时间和显存都是 $O(n^2)$。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>序列长度 $n$</th><th>注意力矩阵大小</th><th>显存（fp16）</th><th>感受</th></tr></thead>
+      <tbody>
+        <tr><td>512</td><td>262,144</td><td>0.5 MB</td><td>毫无压力</td></tr>
+        <tr><td>4,096</td><td>16,777,216</td><td>32 MB</td><td>正常</td></tr>
+        <tr><td>32,768</td><td>1,073,741,824</td><td>2 GB</td><td>单层就吃掉一块显卡</td></tr>
+        <tr><td>131,072</td><td>1.7 × 10¹⁰</td><td>34 GB</td><td>需要专门的长上下文技术</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这就是为什么「长上下文」是一个专门的研究方向。
+    第 21 章会讲 FlashAttention、稀疏注意力、线性注意力等解决方案。
+  </p>
+
+  <h2>9.6 多头注意力：让模型同时关注不同东西</h2>
+
+  <p>
+    如果只做一次注意力，模型只能学到一种「关注模式」。
+    但语言里同时存在多种关系：
+  </p>
+
+  <ul>
+    <li>语法关系：主语和谓语要一致</li>
+    <li>指代关系：「它」指的是哪个名词</li>
+    <li>位置关系：相邻的词互相影响</li>
+    <li>语义关系：同义词、上下位词</li>
+  </ul>
+
+  <p>
+    多头注意力的做法是：<strong>把 $d$ 维的空间切成 $h$ 份，每份独立做一次注意力，
+    最后拼接起来。</strong>
+  </p>
+
+  <div class="formula">
+    $$\begin{aligned}
+    \text{head}_i &= \text{Attention}(\mathbf{X}\mathbf{W}_Q^{(i)},\ \mathbf{X}\mathbf{W}_K^{(i)},\ \mathbf{X}\mathbf{W}_V^{(i)})\\
+    \text{MultiHead}(\mathbf{X}) &= \text{Concat}(\text{head}_1, \ldots, \text{head}_h)\,\mathbf{W}_O
+    \end{aligned}$$
+  </div>
+
+  <p>
+    关键是：<strong>每个头的维度是 $d/h$，所以总计算量和单头一样。</strong>
+    这不是「多做几次」，而是「把同样的算力分成几份，各自关注不同的子空间」。
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 240" role="img" aria-label="多头注意力的示意图">
+      <!-- 输入 -->
+      <rect x="14" y="90" width="58" height="60" rx="8" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="43" y="115" font-size="12" fill="var(--ink-2)" text-anchor="middle" font-family="monospace">X</text>
+      <text x="43" y="135" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="monospace">n×512</text>
+
+      <!-- 分头 -->
+      <g font-family="sans-serif" font-size="11">
+        <rect x="140" y="24" width="120" height="40" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="200" y="42" fill="var(--brand)" text-anchor="middle">head₁</text>
+        <text x="200" y="57" fill="var(--ink-4)" text-anchor="middle" font-size="9.5">n×128</text>
+
+        <rect x="140" y="78" width="120" height="40" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="200" y="96" fill="var(--brand)" text-anchor="middle">head₂</text>
+        <text x="200" y="111" fill="var(--ink-4)" text-anchor="middle" font-size="9.5">n×128</text>
+
+        <rect x="140" y="140" width="120" height="40" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="200" y="158" fill="var(--brand)" text-anchor="middle">head₃</text>
+        <text x="200" y="173" fill="var(--ink-4)" text-anchor="middle" font-size="9.5">n×128</text>
+
+        <rect x="140" y="194" width="120" height="40" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="200" y="212" fill="var(--brand)" text-anchor="middle">head₄</text>
+        <text x="200" y="227" fill="var(--ink-4)" text-anchor="middle" font-size="9.5">n×128</text>
+      </g>
+
+      <!-- 连线 -->
+      <g stroke="var(--line-2)" stroke-width="1.4" fill="none">
+        <path d="M72,120 L106,120 L106,44 L140,44"></path>
+        <path d="M72,120 L106,120 L106,98 L140,98"></path>
+        <path d="M72,120 L106,120 L106,160 L140,160"></path>
+        <path d="M72,120 L106,120 L106,214 L140,214"></path>
+      </g>
+
+      <!-- 拼接 -->
+      <g stroke="var(--brand)" stroke-width="1.8" fill="none">
+        <path d="M260,44 L296,44 L296,120 L330,120"></path>
+        <path d="M260,98 L296,98 L296,120"></path>
+        <path d="M260,160 L296,160 L296,120"></path>
+        <path d="M260,214 L296,214 L296,120"></path>
+      </g>
+      <rect x="330" y="94" width="86" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="373" y="115" font-size="11" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">拼接 + W_O</text>
+      <text x="373" y="132" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="monospace">n×512</text>
+
+      <path d="M416,120 L458,120" stroke="var(--line-2)" stroke-width="1.8" fill="none"></path>
+      <text x="492" y="116" font-size="11" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">输出</text>
+      <text x="492" y="132" font-size="10" fill="var(--ink-4)" text-anchor="middle" font-family="monospace">n×512</text>
+
+      <text x="200" y="14" font-size="10.5" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">4 个头，每个 128 维（512 / 4）</text>
+    </svg>
+    <div class="figure__caption">
+      <b>多头注意力。</b>把 512 维空间切成 4 个 128 维的子空间，
+      每个头独立做注意力，最后拼接并经过一次线性变换。
+      总计算量和单头相同，但模型能同时捕捉多种关系。
+    </div>
+  </div>
+
+  <p>
+    实践中，不同的头确实会分化出不同的功能。研究发现有些头专门关注前一个词，
+    有些头专门找句子的主语，有些头关注标点符号。
+    <strong>没有一个头是「被设计」成这样的——它们是训练自然涌现的。</strong>
+  </p>
+
+  <h2>9.7 位置编码：注意力有个盲区</h2>
+
+  <p>
+    自注意力有一个严重的问题：<strong>它对顺序完全不敏感。</strong>
+  </p>
+
+  <p>
+    看公式 $\text{softmax}(\mathbf{Q}\mathbf{K}^\top)\mathbf{V}$。
+    它做的事情是「对 Value 做加权求和」。如果把输入序列的顺序打乱，
+    $\mathbf{Q}\mathbf{K}^\top$ 的行列会跟着置换，但<strong>每个词拿到的加权和完全一样</strong>。
+  </p>
+
+  <p>
+    换句话说：「猫追老鼠」和「老鼠追猫」在这个机制看来是<strong>同一件事</strong>。
+    这显然不行。我们必须显式地把位置信息注入进去。
+  </p>
+
+  <p>
+    最经典的做法是 Transformer 原论文的<strong>正弦位置编码</strong>：
+  </p>
+
+  <div class="formula">
+    $$\begin{aligned}
+    PE_{(pos, 2i)} &= \sin\!\left(\frac{pos}{10000^{2i/d}}\right)\\[4pt]
+    PE_{(pos, 2i+1)} &= \cos\!\left(\frac{pos}{10000^{2i/d}}\right)
+    \end{aligned}$$
+    <div class="formula__caption">$pos$ 是位置，$i$ 是维度索引。每个位置得到一串独特的「指纹」</div>
+  </div>
+
+  <p>
+    直觉上，这像是一个<strong>二进制计数器</strong>：低位快速振荡（区分相邻位置），
+    高位缓慢变化（区分远距离位置）。所有频率叠加起来，每个位置就得到一个独一无二的模式。
+  </p>
+
+  <p>下面这张图就是位置编码的可视化。蓝色表示正值，红色表示负值：</p>
+
+  <div class="widget" data-widget="posenc">
+    <div class="widget__head"><span class="tag">交互 11</span>正弦位置编码的「指纹」</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <canvas data-h="300"></canvas>
+        <div>
+          <p style="font-size:.86rem;color:var(--ink-2);line-height:1.7;margin:0 0 1rem">
+            横轴是嵌入维度（0 到 64），纵轴是位置 $t$（0 到 40）。
+            每一行是一个位置的编码向量。
+          </p>
+          <div class="readout" data-role="info"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        仔细看最左边几列——它们在不同位置之间快速交替，负责区分「相邻」的位置。
+        而最右边几列几乎不变，负责提供「这个位置大致在哪个区间」的信息。
+        现代大模型更常用<strong>旋转位置编码（RoPE）</strong>，思路类似但和注意力计算结合得更紧密。
+      </p>
+    </div>
+  </div>
+
+  <div class="note note--math">
+    <div class="note__title"><span class="ico">∑</span>为什么用 sin/cos 而不是直接加位置编号？</div>
+    <p>
+      直接用 $0, 1, 2, \ldots$ 会有两个问题：数值会变得很大（第 10000 个位置就是 10000），
+      而且模型没见过更长的位置就没法外推。
+    </p>
+    <p>
+      正弦编码的好处是：<strong>它天然表达了相对位置</strong>。
+      因为 $\sin(a+b) = \sin a\cos b + \cos a\sin b$，
+      位置 $pos+k$ 的编码可以写成位置 $pos$ 编码的一个线性变换，
+      而且这个变换<strong>只依赖于 $k$</strong>。
+      这意味着模型学到的「相对位置关系」可以泛化到训练时没见过的长度。
+    </p>
+    <p>
+      当然，实践表明正弦编码的外推能力也有限。所以才有了后来的 RoPE、
+      ALiBi 等改进方案。
+    </p>
+  </div>
+
+  <h2>9.8 完整的注意力实现</h2>
+
+  <p>把这一章的所有东西写成一个函数，只有 15 行：</p>
+
+  <div class="codeblock" data-lang="python" data-title="attention.py — 缩放点积注意力 + 多头">
+<script type="text/dlcode">
+import numpy as np
+
+def softmax(x, axis=-1):
+    x = x - x.max(axis=axis, keepdims=True)
+    e = np.exp(x)
+    return e / e.sum(axis=axis, keepdims=True)
+
+def scaled_dot_product_attention(Q, K, V, mask=None):
+    """
+    Q: (..., n_q, d_k)
+    K: (..., n_k, d_k)
+    V: (..., n_k, d_v)
+    mask: (..., n_q, n_k) 布尔矩阵，True 表示"不允许看"
+    """
+    d_k = Q.shape[-1]
+
+    # 1) 相似度：Q 的每一行和 K 的每一行做点积
+    scores = Q @ K.transpose(0, -1, -2) / np.sqrt(d_k)     # (..., n_q, n_k)
+
+    # 2) 掩码：把不允许看的位置设成负无穷，softmax 后权重自然为 0
+    if mask is not None:
+        scores = np.where(mask, -1e9, scores)
+
+    # 3) 归一化成权重
+    weights = softmax(scores, axis=-1)
+
+    # 4) 加权求和
+    return weights @ V, weights
+
+class MultiHeadAttention:
+    def __init__(self, d_model=512, n_heads=8):
+        assert d_model % n_heads == 0
+        self.d_model, self.n_heads = d_model, n_heads
+        self.d_k = d_model // n_heads
+        # 三个投影矩阵 + 一个输出投影
+        s = 1.0 / np.sqrt(d_model)
+        self.W_q = np.random.randn(d_model, d_model) * s
+        self.W_k = np.random.randn(d_model, d_model) * s
+        self.W_v = np.random.randn(d_model, d_model) * s
+        self.W_o = np.random.randn(d_model, d_model) * s
+
+    def _split(self, x):
+        """(batch, n, d_model) -> (batch, n_heads, n, d_k)"""
+        b, n, _ = x.shape
+        return x.reshape(b, n, self.n_heads, self.d_k).transpose(0, 2, 1, 3)
+
+    def forward(self, x, mask=None):
+        Q = self._split(x @ self.W_q)
+        K = self._split(x @ self.W_k)
+        V = self._split(x @ self.W_v)
+
+        out, weights = scaled_dot_product_attention(Q, K, V, mask)
+
+        # 拼回 (batch, n, d_model)，再过一次输出投影
+        b, h, n, dk = out.shape
+        out = out.transpose(0, 2, 1, 3).reshape(b, n, h * dk)
+        return out @ self.W_o, weights
+
+# 试一下
+x = np.random.randn(2, 10, 512)        # 2 个样本，10 个词，512 维
+mha = MultiHeadAttention(512, 8)
+out, w = mha.forward(x)
+print("输出形状:", out.shape)            # (2, 10, 512)
+print("注意力形状:", w.shape)            # (2, 8, 10, 10)  ← 8 个头的注意力矩阵
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>掩码：一个必须理解的机制</div>
+    <p>
+      <code>mask</code> 是注意力的「禁止通行」标志。把不允许关注的位置的分数设成 $-10^9$，
+      softmax 之后这些位置的权重就变成 0。
+    </p>
+    <p>
+      两种最常用的掩码：<br>
+      · <strong>因果掩码（causal mask）</strong>：位置 $i$ 只能看 $j \le i$。
+      这是 GPT 类模型的关键，保证了「生成第 $i$ 个词时不会偷看后面的答案」。<br>
+      · <strong>填充掩码（padding mask）</strong>：忽略补齐到统一长度的占位符，避免它们影响结果。
+    </p>
+    <p>
+      注意那个 $-10^9$ 而不是 $-\infty$：用 $-\infty$ 会产生 <code>nan</code>
+      （因为 $-\infty - (-\infty)$）。用一个足够大的负数在数学上等价，
+      数值上安全。这是每个实现都要注意的细节。
+    </p>
+  </div>
+
+  <h2>9.9 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">注意力 <small>attention</small></div>
+      <div class="gloss__def">根据 Query 与 Key 的匹配度，对 Value 做加权平均的可微操作。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">Query / Key / Value</div>
+      <div class="gloss__def">查询、键、值。分别对应「我想找什么」「我是什么」「我有什么信息」。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">缩放点积 <small>scaled dot-product</small></div>
+      <div class="gloss__def">$\mathbf{Q}\mathbf{K}^\top/\sqrt{d_k}$。除以 $\sqrt{d_k}$ 是为了防止 softmax 饱和。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">自注意力 <small>self-attention</small></div>
+      <div class="gloss__def">Q、K、V 都来自同一个序列。让序列内部任意两个位置直接交互。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">多头注意力 <small>multi-head</small></div>
+      <div class="gloss__def">把维度切成多份并行做注意力，让模型同时捕捉多种关系。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">位置编码 <small>positional encoding</small></div>
+      <div class="gloss__def">显式注入顺序信息，因为自注意力本身对顺序不敏感。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>注意力 = 可微的软查询。Query 找匹配的 Key，按权重从 Value 里取信息。</li>
+    <li>选点积是因为它能用矩阵乘法一次算完，而且不需要额外参数。</li>
+    <li>除以 $\sqrt{d_k}$ 是必须的：不缩放会让 softmax 饱和，梯度消失。</li>
+    <li>自注意力把任意两个位置的交互路径缩短到 $O(1)$，代价是 $O(n^2)$ 的复杂度。</li>
+    <li>多头注意力不增加计算量，但让模型能同时关注多种关系。</li>
+    <li>注意力本身对顺序不敏感，必须靠位置编码补上。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么注意力公式里要除以 $\sqrt{d_k}$？不除会怎样？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为点积 $\mathbf{q}\cdot\mathbf{k} = \sum_{j=1}^{d_k} q_jk_j$ 的方差正比于 $d_k$。
+          维度越大，点积的数值范围越宽。
+        </p>
+        <p>
+          不缩放的话，$d_k=512$ 时点积的典型大小是 22 左右。经过 softmax 之后，
+          分布会变得极其尖锐（接近 one-hot），
+          <strong>softmax 的梯度接近 0</strong>，注意力权重几乎无法被训练。
+        </p>
+        <p>
+          除以 $\sqrt{d_k}$ 把方差拉回 1，softmax 保持在梯度健康的区间。
+          这是一个纯粹的数值稳定性考量，但它对训练能否成功至关重要。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么说自注意力解决了「长距离依赖」，而 RNN 没有？</summary>
+      <div class="quiz__answer">
+        <p>
+          关键在于<strong>信息传递的路径长度</strong>。
+        </p>
+        <p>
+          在 RNN 里，位置 1 的信息要传到位置 100，必须经过 99 次隐藏状态更新。
+          每一次都可能丢失一点信息，而且梯度回传要连乘 99 次——这就是梯度消失的来源。
+        </p>
+        <p>
+          在自注意力里，位置 1 和位置 100 是<strong>直接连接</strong>的：
+          $\mathbf{Q}\mathbf{K}^\top$ 矩阵的第 100 行第 1 列就是它们的直接交互强度，
+          路径长度是 $O(1)$。梯度不需要穿过中间步骤，一步就能传回。
+        </p>
+        <p>
+          这也是为什么 Transformer 能用「一层」就建模任意两个位置的关系，
+          而 RNN 需要堆很多层才能扩大感受野。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>多头注意力为什么比单头好？它增加了多少计算量？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>计算量几乎不增加。</strong>假设 $d_{model}=512$，用 8 个头，
+          每个头是 64 维。8 个头的总计算量等于一个 512 维单头——
+          因为注意力是「切成几份分别算再拼起来」，总量守恒。
+        </p>
+        <p>
+          <strong>为什么更好？</strong>因为一次注意力只能产生一种「关注模式」
+          （一个 softmax 分布）。但语言里同时存在多种关系：
+          语法主谓一致、指代消解、相邻词依赖、语义相似……
+        </p>
+        <p>
+          多头相当于给模型提供了 $h$ 个独立的「视角」，
+          每个头在自己的子空间里学习一种关系。而且因为它们最后被拼接起来，
+          模型可以综合利用这些不同的信息。实测中多头带来的提升非常显著。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>如果把输入序列的顺序完全打乱，自注意力的输出会怎样？</summary>
+      <div class="quiz__answer">
+        <p>
+          输出会是<strong>同样的内容，只是顺序也跟着打乱</strong>。
+          因为自注意力对每个位置做的都是「对 Value 的加权求和」，
+          它不知道谁在前谁在后。
+        </p>
+        <p>
+          这就是「排列等变性」（permutation equivariance）。
+          所以必须显式加入位置编码，否则「猫追老鼠」和「老鼠追猫」在模型眼里完全一样。
+        </p>
+        <p>
+          值得一提的是：这个性质在某些任务里反而是优点，
+          比如处理「集合」类型的数据（一堆没有顺序的点云、一组商品），
+          打乱顺序不应该影响结果。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>因果掩码为什么必须存在？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为 GPT 类模型训练时的目标是「预测下一个词」。
+          如果不用掩码，位置 5 的预测就可以直接看到位置 6 的真实答案——
+          模型会学会「抄答案」，训练损失很快降到接近 0，但推理时根本没有答案可抄，
+          表现一塌糊涂。
+        </p>
+        <p>
+          因果掩码把注意力矩阵的上三角（未来位置）设成 $-\infty$，
+          保证位置 $i$ 只能关注 $j \le i$。
+          这样每个位置的预测都只依赖它左边的上下文，和推理时的情形完全一致。
+        </p>
+        <p>
+          实现上是一个上三角布尔矩阵：<code>mask = np.triu(np.ones((n,n)), k=1).astype(bool)</code>。
+          另外注意因果掩码只在<strong>训练</strong>时需要显式构造，
+          推理时因为是一个词一个词生成的，天然不会看到未来。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    现在你掌握了注意力，也就掌握了 Transformer 最核心的零件。
+  </p>
+
+  <p>
+    下一章我们把它组装起来：残差连接、层归一化、前馈网络、
+    编码器和解码器的分工，以及为什么 Transformer 能同时支持
+    BERT（理解型）和 GPT（生成型）两种截然不同的模型。
+  </p>
+
+  <p>
+    组装完成后，你就完整理解了 2017 年那篇论文，以及它之后发生的一切。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

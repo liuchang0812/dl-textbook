@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 3 章 · 多层网络与前向传播 — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="03">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 3 章 · 第一部 直觉篇</span>
+    <h1>多层网络与前向传播</h1>
+    <p class="chapter-head__lead">
+      把神经元排成层、用矩阵乘法一次算完，这就是「前向传播」。
+      这一章会看到两层网络如何解决 XOR，还会遇到一个让人震撼的定理：
+      只要够宽，一个隐藏层可以逼近任何连续函数。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 24 分钟</span>
+      <span>🎯 掌握前向传播的矩阵写法</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>3.1 一层神经元，就是一个矩阵乘法</h2>
+
+  <p>
+    上一章我们让一个神经元处理 $n$ 个输入。现在假设有 <strong>4 个神经元</strong>，
+    每个都接收同样 3 个输入。如果一个个算，要写四遍公式：
+  </p>
+
+  <div class="formula">
+    $$\begin{aligned}
+    a_1 &= \sigma(w_{11}x_1 + w_{12}x_2 + w_{13}x_3 + b_1)\\
+    a_2 &= \sigma(w_{21}x_1 + w_{22}x_2 + w_{23}x_3 + b_2)\\
+    a_3 &= \sigma(w_{31}x_1 + w_{32}x_2 + w_{33}x_3 + b_3)\\
+    a_4 &= \sigma(w_{41}x_1 + w_{42}x_2 + w_{43}x_3 + b_4)
+    \end{aligned}$$
+  </div>
+
+  <p>
+    写成这样不仅啰嗦，而且没法在 GPU 上并行。关键观察是：
+    <strong>这四个式子结构完全一样，只是系数不同</strong>。而这正是矩阵乘法的定义。
+    把它们摞起来：
+  </p>
+
+  <div class="formula">
+    $$\underbrace{\begin{bmatrix} a_1\\a_2\\a_3\\a_4 \end{bmatrix}}_{\mathbf{a}\ (4\times1)}
+    = \sigma\!\left(
+    \underbrace{\begin{bmatrix} w_{11}&w_{12}&w_{13}\\ w_{21}&w_{22}&w_{23}\\ w_{31}&w_{32}&w_{33}\\ w_{41}&w_{42}&w_{43}\end{bmatrix}}_{\mathbf{W}\ (4\times3)}
+    \underbrace{\begin{bmatrix} x_1\\x_2\\x_3 \end{bmatrix}}_{\mathbf{x}\ (3\times1)}
+    +
+    \underbrace{\begin{bmatrix} b_1\\b_2\\b_3\\b_4 \end{bmatrix}}_{\mathbf{b}\ (4\times1)}
+    \right)$$
+    <div class="formula__caption">形状检查：$(4\times3)\times(3\times1) = (4\times1)$，维度对得上</div>
+  </div>
+
+  <p>也就是一行：</p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">一层网络的统一写法</div>
+    <p>$$\mathbf{a} = \sigma(\mathbf{W}\mathbf{x} + \mathbf{b})$$</p>
+    <p>
+      $\mathbf{W}$ 的第 $i$ 行就是第 $i$ 个神经元的全部权重。
+      <strong>整个深度学习，本质上就是反复做这件事：矩阵乘法 → 加偏置 → 非线性。</strong>
+    </p>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>矩阵乘法到底在做什么</div>
+    <p>
+      别被线性代数的术语吓到。$\mathbf{W}\mathbf{x}$ 做的事情是：
+      对输出向量的第 $i$ 个元素，取 $\mathbf{W}$ 的第 $i$ 行与 $\mathbf{x}$ 做「对应位置相乘再求和」。
+    </p>
+    <p>
+      说白了，就是<strong>同时算完所有神经元的加权求和</strong>。
+      之所以要用矩阵，是因为 GPU 有几千个核心可以同时做乘加运算——
+      矩阵乘法是并行计算最擅长的形状。
+    </p>
+  </div>
+
+  <h2>3.2 前向传播：一层一层往下算</h2>
+
+  <p>
+    现在把两层接起来。下面是一个 3 → 4 → 2 的网络：3 个输入，4 个隐藏神经元，2 个输出。
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 520 300" role="img" aria-label="一个 3-4-2 的前馈神经网络结构图">
+      <g stroke="var(--brand)" stroke-width="1.2" opacity="0.3">
+        <line x1="70" y1="70" x2="260" y2="45"></line>
+        <line x1="70" y1="70" x2="260" y2="115"></line>
+        <line x1="70" y1="70" x2="260" y2="185"></line>
+        <line x1="70" y1="70" x2="260" y2="255"></line>
+        <line x1="70" y1="150" x2="260" y2="45"></line>
+        <line x1="70" y1="150" x2="260" y2="115"></line>
+        <line x1="70" y1="150" x2="260" y2="185"></line>
+        <line x1="70" y1="150" x2="260" y2="255"></line>
+        <line x1="70" y1="230" x2="260" y2="45"></line>
+        <line x1="70" y1="230" x2="260" y2="115"></line>
+        <line x1="70" y1="230" x2="260" y2="185"></line>
+        <line x1="70" y1="230" x2="260" y2="255"></line>
+        <line x1="260" y1="45" x2="450" y2="115"></line>
+        <line x1="260" y1="45" x2="450" y2="185"></line>
+        <line x1="260" y1="115" x2="450" y2="115"></line>
+        <line x1="260" y1="115" x2="450" y2="185"></line>
+        <line x1="260" y1="185" x2="450" y2="115"></line>
+        <line x1="260" y1="185" x2="450" y2="185"></line>
+        <line x1="260" y1="255" x2="450" y2="115"></line>
+        <line x1="260" y1="255" x2="450" y2="185"></line>
+      </g>
+      <g fill="var(--brand-soft)" stroke="var(--brand-line)" stroke-width="2">
+        <circle cx="70" cy="70" r="18"></circle>
+        <circle cx="70" cy="150" r="18"></circle>
+        <circle cx="70" cy="230" r="18"></circle>
+        <circle cx="260" cy="45" r="18"></circle>
+        <circle cx="260" cy="115" r="18"></circle>
+        <circle cx="260" cy="185" r="18"></circle>
+        <circle cx="260" cy="255" r="18"></circle>
+        <circle cx="450" cy="115" r="18"></circle>
+        <circle cx="450" cy="185" r="18"></circle>
+      </g>
+      <g font-family="monospace" font-size="12" fill="var(--brand)" text-anchor="middle" dominant-baseline="central">
+        <text x="70" y="70">x₁</text><text x="70" y="150">x₂</text><text x="70" y="230">x₃</text>
+        <text x="260" y="45">h₁</text><text x="260" y="115">h₂</text><text x="260" y="185">h₃</text><text x="260" y="255">h₄</text>
+        <text x="450" y="115">y₁</text><text x="450" y="185">y₂</text>
+      </g>
+      <g font-family="sans-serif" font-size="11" fill="var(--ink-4)" text-anchor="middle">
+        <text x="70" y="285">输入层</text>
+        <text x="260" y="285">隐藏层（4 个神经元）</text>
+        <text x="450" y="285">输出层</text>
+      </g>
+      <g font-family="sans-serif" font-size="10.5" fill="var(--ink-3)">
+        <text x="120" y="30">W⁽¹⁾ : 4×3</text>
+        <text x="330" y="30">W⁽²⁾ : 2×4</text>
+      </g>
+    </svg>
+    <div class="figure__caption">
+      <b>前馈神经网络。</b>「前馈」的意思是信息只往一个方向流动：从左到右，没有回头路。
+      连接数 = 3×4 + 4×2 = 20 条，每条边对应一个权重。
+    </div>
+  </div>
+
+  <p>用矩阵写出来，前向传播只有四行：</p>
+
+  <div class="formula">
+    $$\begin{aligned}
+    \mathbf{z}^{(1)} &= \mathbf{W}^{(1)}\mathbf{x} + \mathbf{b}^{(1)} &\quad (4\times3)(3) &\to (4)\\
+    \mathbf{h} &= \sigma(\mathbf{z}^{(1)}) &\quad &\to (4)\\
+    \mathbf{z}^{(2)} &= \mathbf{W}^{(2)}\mathbf{h} + \mathbf{b}^{(2)} &\quad (2\times4)(4) &\to (2)\\
+    \hat{\mathbf{y}} &= \text{softmax}(\mathbf{z}^{(2)}) &\quad &\to (2)
+    \end{aligned}$$
+  </div>
+
+  <p>
+    上标 $(1)$、$(2)$ 表示「第几层」，不是指数。这是深度学习论文里的通用约定，要习惯。
+  </p>
+
+  <div class="note note--math">
+    <div class="note__title"><span class="ico">∑</span>softmax：把分数变成概率</div>
+    <p>
+      多分类的输出层通常用 softmax，它把任意实数向量变成一个概率分布
+      （每个值都在 0~1 之间，且总和为 1）：
+    </p>
+    <p style="text-align:center;margin:.7rem 0">$$\text{softmax}(z_i) = \frac{e^{z_i}}{\sum_j e^{z_j}}$$</p>
+    <p>
+      分子用指数是为了拉开差距：大数会变得更大，而且永远是正的。
+      分母做归一化。第 11 章讲语言模型时，softmax 会出现在每一个词的预测上。
+    </p>
+  </div>
+
+  <h2>3.3 XOR 是怎么被解决的</h2>
+
+  <p>
+    回到上一章的悬案。Minsky 说单层网络解决不了 XOR。但如果我们中间加一层隐藏层呢？
+  </p>
+
+  <p>
+    思路非常巧妙：<strong>把 XOR 拆成两个线性可分的子问题。</strong>
+  </p>
+
+  <ul>
+    <li>$\text{XOR}(x_1,x_2) = (x_1 \text{ OR } x_2) \text{ AND NOT}(x_1 \text{ AND } x_2)$</li>
+    <li>「或」和「与」各自都是线性可分的，一个神经元就能学会。</li>
+    <li>把两个结果再交给输出层做一个线性组合，就能得到 XOR。</li>
+  </ul>
+
+  <p>
+    换句话说：<strong>隐藏层把原始空间「扭曲」了，让本来不可分的问题在新空间里变得可分。</strong>
+    拖动下面的滑块，看决策区域是怎么从一团模糊变成清晰的棋盘状的：
+  </p>
+
+  <div class="widget" data-widget="xor">
+    <div class="widget__head"><span class="tag">交互 4</span>两层网络把 XOR 切开</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <canvas data-h="380"></canvas>
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">训练进度</span><span class="ctrl__val" data-v="t">0%</span></div>
+            <input type="range" data-p="t" min="0" max="1" step="0.01" value="0">
+          </div>
+          <div class="readout" data-role="info" style="margin-top:.8rem"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        背景颜色是网络对每个位置的预测（蓝=1，红=0）。两条虚线是两个隐藏神经元的决策边界：
+        <span style="color:#0f9d8f;font-weight:700">绿线</span> 学会「或」，
+        <span style="color:#c2410c;font-weight:700">橙线</span> 学会「与」。
+        把它们拖到 100%，蓝色区域正好覆盖左上和右下两个点。
+      </p>
+    </div>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">隐藏层的本质</div>
+    <p>
+      隐藏层不是「中间层」这么简单。它的作用是<strong>重新表示数据</strong>——
+      把输入映射到一个新的坐标系里，在那里原本纠缠在一起的两类样本被拉开了。
+    </p>
+    <p>
+      这正是「表示学习」（representation learning）这个词的由来。
+      现代大模型的每一层都在做这件事：把词、句子、概念重新编码成更容易处理的形式。
+    </p>
+  </div>
+
+  <h2>3.4 通用逼近定理：为什么神经网络「什么都能学」</h2>
+
+  <p>
+    1989 年，George Cybenko 等人证明了一个让人惊讶的结论：
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">Universal Approximation Theorem</div>
+    <p>
+      一个只有<strong>单个隐藏层</strong>的前馈网络，只要隐藏层神经元足够多，
+      就可以以任意精度逼近任何定义在紧集上的连续函数。
+    </p>
+  </div>
+
+  <p>
+    这个定理听起来像是在说「一层就够了，深度没用」。但实践中完全不是这么回事。
+    原因在于定理只说「存在」这样的网络，没说：
+  </p>
+
+  <ul>
+    <li>需要多少个神经元（可能是指数级的多，多到装不下）</li>
+    <li>怎么找到那组权重（梯度下降可能根本训不出来）</li>
+    <li>需要多少数据（参数越多，需要的数据越多）</li>
+  </ul>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>别被定理骗了</div>
+    <p>
+      「可以逼近」不等于「学得到」。一个宽度 $2^n$ 的单层网络理论上能拟合任何东西，
+      但你既训练不动它，它也会把所有噪声都背下来。
+    </p>
+    <p>
+      <strong>深度的价值在于「复用」。</strong>深层网络可以把简单特征组合成复杂特征，
+      而每一层都复用了上一层的成果。这带来的效率提升是指数级的：
+      有些函数用深网络只需要 $O(n)$ 个参数，用浅网络却需要 $O(2^n)$ 个。
+    </p>
+  </div>
+
+  <h3>一个直观的类比</h3>
+
+  <p>
+    假设你要计算 $x^{16}$。笨办法是乘 15 次。聪明办法是
+    $x \to x^2 \to x^4 \to x^8 \to x^{16}$，只乘 4 次。
+    后者的每一步都<strong>复用了上一步的结果</strong>，这就是「深度」的威力。
+  </p>
+
+  <p>
+    神经网络也是这样：第 5 层不需要从像素重新学起，它直接使用第 4 层已经提取好的特征。
+    这就是为什么现代大模型动辄上百层，而不是把一个巨大的单层网络摊平。
+  </p>
+
+  <h2>3.5 前向传播的代码</h2>
+
+  <p>把 3-4-2 网络写出来，不到 30 行：</p>
+
+  <div class="codeblock" data-lang="python" data-title="mlp_forward.py — 一个完整的两层网络前向传播">
+<script type="text/dlcode">
+import numpy as np
+
+class TwoLayerNet:
+    def __init__(self, n_in=3, n_hidden=4, n_out=2):
+        # 用小随机数初始化。乘 0.1 是为了不让初始输出太极端
+        self.W1 = np.random.randn(n_hidden, n_in) * 0.1
+        self.b1 = np.zeros(n_hidden)
+        self.W2 = np.random.randn(n_out, n_hidden) * 0.1
+        self.b2 = np.zeros(n_out)
+
+    def forward(self, x):
+        """x 的形状是 (n_in,) 或 (batch, n_in)"""
+        self.x  = x
+        self.z1 = x @ self.W1.T + self.b1        # (batch, n_hidden)
+        self.h  = np.maximum(0, self.z1)          # ReLU
+        self.z2 = self.h @ self.W2.T + self.b2    # (batch, n_out)
+        return self.softmax(self.z2)
+
+    @staticmethod
+    def softmax(z):
+        z = z - z.max(axis=-1, keepdims=True)     # 减最大值防止 exp 溢出
+        e = np.exp(z)
+        return e / e.sum(axis=-1, keepdims=True)
+
+net = TwoLayerNet()
+x = np.array([1.0, -0.5, 2.0])
+print("输出概率:", net.forward(x))
+print("参数量:", net.W1.size + net.b1.size + net.W2.size + net.b2.size)
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>两个必须记住的工程细节</div>
+    <p>
+      <strong>1. 为什么 softmax 要先减最大值？</strong>
+      如果 $z$ 里有 1000，$e^{1000}$ 会溢出成 <code>inf</code>。
+      减去最大值后最大的指数变成 $e^0 = 1$，数学上完全等价，但不会溢出。
+      这个技巧叫 <em>log-sum-exp trick</em>，你会在几乎每个大模型实现里看到它。
+    </p>
+    <p>
+      <strong>2. 为什么 <code>x @ W1.T</code> 要转置？</strong>
+      因为我们把 $\mathbf{W}$ 存成「(输出维度, 输入维度)」的形状，
+      这样每一行就是一个神经元的权重，读起来更直观。这只是约定，不影响数学。
+    </p>
+  </div>
+
+  <h2>3.6 参数量怎么算</h2>
+
+  <p>
+    参数量的计算极其简单：<strong>连接数 + 偏置数</strong>。
+    对相邻的两层（$n_{\text{in}}$ 个输入，$n_{\text{out}}$ 个输出）：
+  </p>
+
+  <div class="formula">
+    $$\text{参数量} = n_{\text{in}} \times n_{\text{out}} + n_{\text{out}}$$
+  </div>
+
+  <p>用这个公式算几个真实网络，你会对「大模型」的规模有具体的感受：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>网络</th><th>结构</th><th>参数量</th><th>直觉</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>本节的玩具网络</td><td>3 → 4 → 2</td><td>约 30</td><td>写在便利贴上</td></tr>
+        <tr><td>MNIST 手写数字</td><td>784 → 128 → 10</td><td>约 10 万</td><td>一张小图片的文本</td></tr>
+        <tr><td>LeNet-5 (1998)</td><td>2 个卷积 + 3 个全连接</td><td>约 6 万</td><td>能识别支票数字</td></tr>
+        <tr><td>AlexNet (2012)</td><td>5 卷积 + 3 全连接</td><td>6000 万</td><td>ImageNet 冠军</td></tr>
+        <tr><td>ResNet-50 (2015)</td><td>50 层卷积</td><td>2500 万</td><td>现代视觉基线</td></tr>
+        <tr><td>BERT-base (2018)</td><td>12 层 Transformer</td><td>1.1 亿</td><td>第一个「预训练」爆款</td></tr>
+        <tr><td>GPT-2 (2019)</td><td>48 层</td><td>15 亿</td><td>写出的文章以假乱真</td></tr>
+        <tr><td>GPT-3 (2020)</td><td>96 层</td><td>1750 亿</td><td>少样本学习能力涌现</td></tr>
+        <tr><td>现代前沿模型</td><td>上百层 + MoE</td><td>数千亿 ~ 万亿</td><td>训练一次上亿美元</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    注意 <strong>GPT-3 的参数量是 AlexNet 的 3000 倍</strong>，而这两者只隔了 8 年。
+    这个增长速度是理解大模型时代的核心背景。
+  </p>
+
+  <h2>3.7 批处理：为什么输入是矩阵而不是向量</h2>
+
+  <p>
+    上面代码里我一直写着 <code>(batch, n_in)</code>。这是实际训练中的关键细节。
+  </p>
+
+  <p>
+    你当然可以一次只喂一个样本，但那样 GPU 的几千个核心绝大部分时间在闲着。
+    正确的做法是把 $B$ 个样本堆成一个矩阵，一次性算完：
+  </p>
+
+  <div class="formula">
+    $$\underbrace{\mathbf{Z}^{(1)}}_{(B\times 4)} = \underbrace{\mathbf{X}}_{(B\times 3)} \underbrace{\mathbf{W}^{(1)\top}}_{(3\times 4)} + \underbrace{\mathbf{b}^{(1)}}_{(4)}$$
+    <div class="formula__caption">
+      偏置 $\mathbf{b}$ 会自动广播（broadcast）到每一行——这是 NumPy / PyTorch 的语法糖
+    </div>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>批处理为什么不影响结果</div>
+    <p>
+      因为每个样本是独立计算的，样本之间没有交互。所以「一次算 32 个」和
+      「循环算 32 次」在数学上完全等价，只是前者快几十倍。
+    </p>
+    <p>
+      <strong>例外情况</strong>：BatchNorm 和注意力机制会跨样本或跨位置交互，
+      那时候「批量大小」就会真的影响结果了。第 6 章和第 10 章会讲。
+    </p>
+  </div>
+
+  <p>
+    批量大小（batch size）是一个需要权衡的超参数：
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">批量太小</div>
+      <p class="card__body">
+        比如 1~8。计算效率低，梯度噪声大，训练过程抖动。但它有时能帮助模型跳出糟糕的局部区域。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">批量太大</div>
+      <p class="card__body">
+        比如 4096。GPU 利用率高，梯度稳定。但显存吃紧，而且泛化能力有时反而变差，通常需要配合更大的学习率。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">常见做法</div>
+      <p class="card__body">
+        视觉任务 32~256，语言模型预训练 512~4096（配合梯度累积凑到百万级 token 的全局批量）。
+      </p>
+    </div>
+  </div>
+
+  <h2>3.8 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">前向传播 <small>forward pass</small></div>
+      <div class="gloss__def">输入经过每一层的「矩阵乘 → 加偏置 → 激活」，最终得到预测值的过程。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">隐藏层 <small>hidden layer</small></div>
+      <div class="gloss__def">输入和输出之间的层。它把数据重新表示，让原本不可分的问题变得可分。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">MLP <small>多层感知机</small></div>
+      <div class="gloss__def">由若干全连接层堆叠成的网络。是最基础的深度网络形态。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">全连接 <small>fully connected / dense</small></div>
+      <div class="gloss__def">上一层的每个输出都连到下一层的每个神经元。参数量为 $n_{in}\times n_{out}$。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">批量 <small>batch</small></div>
+      <div class="gloss__def">一次前向传播同时处理的样本数。越大越快，但更吃显存。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>一层网络 = $\mathbf{a} = \sigma(\mathbf{W}\mathbf{x}+\mathbf{b})$。矩阵乘法的意义是「同时算完所有神经元」。</li>
+    <li>隐藏层的作用是<strong>重新表示数据</strong>，让线性不可分的问题在新空间里变得可分。</li>
+    <li>通用逼近定理说单隐层可以逼近任何连续函数，但它没说「学得到」——深度的真正价值是<strong>特征复用</strong>。</li>
+    <li>参数量 = 连接数 + 偏置数。从 AlexNet 的 6000 万到 GPT-3 的 1750 亿，只用了 8 年。</li>
+    <li>实践中永远用批量处理，因为 GPU 擅长并行矩阵运算。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>一个 784 → 256 → 128 → 10 的网络有多少参数？</summary>
+      <div class="quiz__answer">
+        <p>
+          逐层算（连接 + 偏置）：<br>
+          第一层：784 × 256 + 256 = <strong>200,960</strong><br>
+          第二层：256 × 128 + 128 = <strong>32,896</strong><br>
+          第三层：128 × 10 + 10 = <strong>1,290</strong><br>
+          总计约 <strong>235,146</strong> 个参数，也就是 23.5 万个浮点数。
+        </p>
+        <p>
+          用 float32 存储只要不到 1 MB。所以 MNIST 这种任务，算力和显存都完全不是瓶颈——
+          这也解释了为什么它是入门练习的标配。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么加一个隐藏层就能解决 XOR？用一句话说清楚。</summary>
+      <div class="quiz__answer">
+        <p>
+          因为隐藏层把输入映射到了一个新的表示空间，在那里两类样本变得线性可分了。
+        </p>
+        <p>
+          具体到 XOR：隐藏神经元 1 学会「或」（$x_1+x_2 > 0.5$），
+          隐藏神经元 2 学会「与」（$x_1+x_2 > 1.5$）。
+          于是四个样本在新空间里的坐标变成 $(0,0)\to(0,0)$、$(0,1)\to(1,0)$、
+          $(1,0)\to(1,0)$、$(1,1)\to(1,1)$——现在一条直线就能分开了。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>通用逼近定理说「一层就够」，为什么我们还要用几百层？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为定理只保证「存在」，不保证「可得」。要逼近某些函数，单层网络可能需要
+          <strong>指数级</strong>的神经元数量，多到根本装不进显存，也根本训不出来。
+        </p>
+        <p>
+          深层网络的真正优势是<strong>层次化的特征复用</strong>：计算 $x^{16}$ 用
+          $x\to x^2\to x^4\to x^8\to x^{16}$ 只要 4 次乘法，而不是 15 次。
+          每一层站在上一层的肩膀上，效率是指数级的差别。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么 softmax 要先减去最大值？不减去会怎样？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为 $e^{z}$ 增长极快：$e^{89}$ 就已经超出 float32 的范围，变成 <code>inf</code>。
+          一旦出现 <code>inf</code>，<code>inf / inf</code> 就是 <code>nan</code>，整个训练直接崩掉。
+        </p>
+        <p>
+          减去最大值后，最大的指数项变成 $e^0=1$，其余都小于 1，永不溢出。
+          而因为分子分母同时乘了 $e^{-max}$，结果在数学上完全不变。
+          这个技巧叫 log-sum-exp，是大模型推理中最基础也最关键的数值稳定手段之一。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    到这里，我们已经能搭出一个网络，也能算出它的预测。但网络的参数还是随机的——
+    它只会瞎猜。真正的问题来了：
+  </p>
+
+  <p>
+    <strong>我们要怎么知道该把每个参数往哪个方向调？</strong>
+    这就是「学习」的核心。下一章，我们从最朴素的直觉出发：
+    把损失想象成一座山，我们要走到谷底。然后你会看到「学习率」这个参数
+    如何决定你是稳步下山、来回震荡，还是直接飞出大气层。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

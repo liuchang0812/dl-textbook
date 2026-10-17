@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 11 章 · 语言模型与 GPT — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="11">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 11 章 · 第四部 注意力革命</span>
+    <h1>语言模型与 GPT</h1>
+    <p class="chapter-head__lead">
+      GPT 的全部训练目标只有一句话：<strong>预测下一个词</strong>。
+      听起来简单到荒谬。但当这件事被做到万亿参数、几万亿 token 的规模时，
+      翻译、推理、写代码、做数学题这些能力会自己长出来。
+      这一章讲清楚这个「简单目标」为什么如此强大。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 32 分钟</span>
+      <span>🎯 理解语言模型、分词、困惑度与缩放律</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>11.1 语言模型：给句子打一个概率</h2>
+
+  <p>
+    一个<strong>语言模型</strong>做的事情，本质上就是回答一个问题：
+    <em>这句话有多像人话？</em>
+  </p>
+
+  <div class="formula">
+    $$P(\text{今天天气真好}) = 0.0083$$
+    $$P(\text{真好天气今天}) = 0.00000012$$
+  </div>
+
+  <p>
+    它给任何一段文本赋予一个概率。像人话的概率高，不像人话的概率低。
+  </p>
+
+  <p>
+    但直接给整个句子打分很难，因为句子的数量是天文数字。
+    所以实践中我们用一个数学恒等式把它拆开——<strong>链式法则</strong>：
+  </p>
+
+  <div class="formula">
+    $$P(w_1, w_2, \ldots, w_n) = \prod_{t=1}^{n} P(w_t \mid w_1, \ldots, w_{t-1})$$
+    <div class="formula__caption">整句话的概率 = 每个词在「它之前所有词」条件下的概率之积</div>
+  </div>
+
+  <p>
+    这个式子看起来只是把问题变复杂了，但它带来了一个决定性的好处：
+    <strong>每个因子都是同一个形式的问题——「给定前文，下一个词是什么」。</strong>
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">GPT 的全部秘密</div>
+    <p>
+      <strong>把「理解语言」这件宏大而模糊的事，化简成「预测下一个 token」这件具体而可测量的事。</strong>
+    </p>
+    <p>
+      而这个任务有个绝妙的性质：<em>答案就在数据里，不需要人工标注。</em>
+      任何一段文本，「今天天气真」的答案就是「好」。
+      互联网上有几十万亿 token 的文本，每一段都自动变成一道训练题。
+    </p>
+    <p>
+      这就是第 1 章说的「自监督学习」，也是大模型时代真正的起点。
+    </p>
+  </div>
+
+  <h2>11.2 从 n-gram 到神经网络</h2>
+
+  <p>
+    「给定前文预测下一个词」这个任务其实非常古老。在神经网络之前，
+    人们用的是 <strong>n-gram</strong>：只看前面 $n-1$ 个词，数一数语料里出现过多少次。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="bigram 语言模型 — 用统计做预测">
+<script type="text/dlcode">
+from collections import defaultdict
+
+# 训练：数一数每个词后面跟着什么
+counts = defaultdict(lambda: defaultdict(int))
+
+with open("corpus.txt") as f:
+    for line in f:
+        words = line.split()
+        for prev, nxt in zip(words, words[1:]):
+            counts[prev][nxt] += 1
+
+# 预测：给定前一个词，返回最可能的下一个词
+def predict(prev_word):
+    if prev_word not in counts:
+        return None
+    dist = counts[prev_word]
+    total = sum(dist.values())
+    return sorted(dist.items(), key=lambda kv: -kv[1])[:5]
+
+print(predict("今天"))   # [('天气', 342), ('是', 210), ('下午', 88), ...]
+</script>
+  </div>
+
+  <p>n-gram 有三个致命问题，正好对应神经网络的三个优势：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>问题</th><th>n-gram</th><th>神经网络</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>上下文太短</strong></td>
+          <td>通常只看 2~5 个词。看到「我出生在法国，所以我说一口流利的」，
+            它看不到 10 个词之前的「法国」</td>
+          <td>可以看几千到几百万个 token</td>
+        </tr>
+        <tr>
+          <td><strong>数据稀疏</strong></td>
+          <td>「量子纠缠很」这种组合语料里没出现过，概率就是 0</td>
+          <td>用连续向量表示，能泛化到没见过的组合</td>
+        </tr>
+        <tr>
+          <td><strong>参数爆炸</strong></td>
+          <td>词表 5 万，看 5 个词就要 $50000^5$ 种组合，根本存不下</td>
+          <td>参数量只和模型维度、层数有关，与上下文长度无关</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    第二点尤其重要。n-gram 把每个词当作一个<strong>独立的符号</strong>，
+    而神经网络把词映射成<strong>连续的向量</strong>。
+    于是「猫」和「小猫」在向量空间里离得很近，
+    模型在「猫 喜欢 吃 鱼」上学到的规律，能部分迁移到「小猫 喜欢 吃 鱼」。
+  </p>
+
+  <p>这种「用连续向量表示离散符号」的思想，就是<strong>词嵌入</strong>（word embedding）。</p>
+
+  <div class="widget" data-widget="embedding">
+    <div class="widget__head"><span class="tag">交互 13</span>词向量的相似度</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <div>
+          <p style="font-size:.85rem;color:var(--ink-2);margin:0 0 .7rem">选择一个词，看看它和其他词的余弦相似度：</p>
+          <div class="chips">
+            <button class="chip" data-w="猫">猫</button>
+            <button class="chip" data-w="狗">狗</button>
+            <button class="chip" data-w="老虎">老虎</button>
+            <button class="chip" data-w="汽车">汽车</button>
+            <button class="chip" data-w="飞机">飞机</button>
+            <button class="chip" data-w="跑">跑</button>
+            <button class="chip" data-w="吃">吃</button>
+          </div>
+          <div class="readout" data-role="info" style="margin-top:.9rem"></div>
+        </div>
+        <div>
+          <p style="font-size:.85rem;color:var(--ink-3);margin:0 0 .6rem">相似度排名</p>
+          <div class="bars" data-role="bars"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        这只是 4 维的示意向量。真实模型里是 768 到 8192 维，
+        而且相似度不是人设的，是从「哪些词出现在相似的上下文里」学出来的。
+        一个著名的例子：$vec(\text{国王}) - vec(\text{男人}) + vec(\text{女人}) \approx vec(\text{女王})$。
+      </p>
+    </div>
+  </div>
+
+  <h2>11.3 分词：模型眼里的文字长什么样</h2>
+
+  <p>
+    模型不认识「文字」，只认识数字。所以第一步要把文本切成 token 再映射成 ID。
+    这个看似琐碎的环节，实际上深刻影响着模型的能力。
+  </p>
+
+  <p>三种粒度的对比：</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>粒度</th><th>「unbelievable」切成</th><th>词表大小</th><th>问题</th></tr></thead>
+      <tbody>
+        <tr><td><strong>字符级</strong></td><td>u-n-b-e-l-i-e-v-a-b-l-e（12 个）</td><td>约 100</td><td>序列太长，模型要花大量精力学拼写</td></tr>
+        <tr><td><strong>词级</strong></td><td>unbelievable（1 个）</td><td>几十万～上百万</td><td>遇到没见过的词就是 <code>&lt;UNK&gt;</code>，无法处理</td></tr>
+        <tr><td><strong>子词级</strong> ✅</td><td>un-believ-able（3 个）</td><td>3 万～20 万</td><td>折中方案，业界标准</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>BPE：字节对编码</h3>
+
+  <p>
+    现代大模型几乎都用 BPE 或其变体。它的算法简单到可以用一段伪代码描述：
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="BPE 训练算法的核心">
+<script type="text/dlcode">
+# 1) 初始化：把每个词拆成字符
+#    "low" -> ['l','o','w']
+
+# 2) 统计所有相邻字符对的出现频率
+#    ('l','o') 出现 7 次, ('o','w') 出现 5 次, ...
+
+# 3) 把频率最高的一对合并成一个新符号
+#    ('l','o') 最高 -> 合并成 'lo'
+
+# 4) 重复步骤 2-3，直到词表达到目标大小
+
+# 效果：常见组合会逐渐合并成完整单词，
+#       罕见词则保留为多个碎片。
+#       训练语料里 "the" 出现几百万次 -> 很早就合并成 1 个 token
+#       而 "tokenization" 可能被切成 "token" + "ization" 两块
+</script>
+  </div>
+
+  <p>
+    这个「贪心地合并最频繁的相邻对」的过程，让词表自动适配语料：
+    <strong>高频词拿到完整 token，低频词被切成有意义的碎片。</strong>
+  </p>
+
+  <p>亲手试试分词的粒度：</p>
+
+  <div class="widget" data-widget="tokenizer">
+    <div class="widget__head"><span class="tag">交互 14</span>子词分词演示</div>
+    <div class="widget__body">
+      <div class="ctrl">
+        <div class="ctrl__row"><span class="ctrl__label">输入一段文字</span></div>
+        <input type="text" data-role="text" value="The transformer model learns tokenization"
+               style="width:100%;padding:.5rem .7rem;border-radius:8px;border:1px solid var(--line-2);background:var(--surface);color:var(--ink);font-family:var(--font-mono);font-size:.85rem;outline:none">
+      </div>
+      <p style="font-size:.78rem;color:var(--ink-3);margin:.9rem 0 .45rem">切分结果（紫色 = 被拆成碎片的词）</p>
+      <div class="chips" data-role="chips" style="margin-bottom:.9rem"></div>
+      <div class="readout" data-role="info"></div>
+      <p class="widget__note">
+        试着输入中文、英文、中英混合、还有像 <code>antidisestablishmentarianism</code>
+        这样的长词，观察 token 数量的变化。中文通常一个字一个 token
+        （因为汉字本身信息密度高），而英文长词会被切成 2~4 个碎片。
+      </p>
+    </div>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>分词带来的三个真实问题</div>
+    <p>
+      <strong>1. 算术能力差。</strong>模型看到的不是「1234」而是
+      <code>123</code>+<code>4</code> 这样的碎片，它根本不知道这是一个四位数。
+      这被认为是 LLM 数学能力弱的一个重要原因。
+    </p>
+    <p>
+      <strong>2. 中英文成本不同。</strong>同样一段话，中文和英文消耗的 token 数不一样。
+      这直接影响 API 计费和多语言能力的均衡性。
+    </p>
+    <p>
+      <strong>3. 拼写任务困难。</strong>问模型「strawberry 里有几个 r」，
+      它看到的是 <code>straw</code>+<code>berry</code>，数不清字母。
+      这不是「模型笨」，而是它压根看不到字符级别的东西。
+    </p>
+  </div>
+
+  <h2>11.4 训练目标：next token prediction</h2>
+
+  <p>
+    现在我们有了 token 序列，模型要做的事情就非常清晰了。给定一段文本：
+  </p>
+
+  <div class="codeblock codeblock--out" data-lang="text" data-title="训练样本的构造">
+<script type="text/dlcode">
+输入 (x):  深度 学习 是 一门 让 机器 从 数据 中
+目标 (y):  学习 是 一门 让 机器 从 数据 中 学习
+
+                ↑ 整体向右平移一格，就这么简单
+</script>
+  </div>
+
+  <p>
+    模型对<strong>每一个位置</strong>都输出一个词表大小的概率分布，
+    然后我们要求「正确答案」那一项的概率尽可能大。
+  </p>
+
+  <p>
+    注意这里一个极其优雅的地方：<strong>一段长度为 $n$ 的文本，同时提供了 $n$ 个训练样本</strong>。
+    位置 1 预测位置 2，位置 2 预测位置 3……全都算作损失。
+    这就是为什么大模型能用同样的数据量获得极高的训练效率。
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 240" role="img" aria-label="语言模型训练目标的示意图">
+      <defs>
+        <marker id="arL" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--line-2)"></path>
+        </marker>
+      </defs>
+
+      <!-- 输入行 -->
+      <text x="8" y="46" font-size="11" fill="var(--ink-3)" font-family="sans-serif">输入</text>
+      <g font-family="monospace" font-size="11.5" text-anchor="middle" dominant-baseline="central">
+        <rect x="60" y="34" width="62" height="26" rx="6" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="91" y="47" fill="var(--brand)">深度</text>
+        <rect x="128" y="34" width="62" height="26" rx="6" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="159" y="47" fill="var(--brand)">学习</text>
+        <rect x="196" y="34" width="62" height="26" rx="6" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="227" y="47" fill="var(--brand)">是</text>
+        <rect x="264" y="34" width="62" height="26" rx="6" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="295" y="47" fill="var(--brand)">一门</text>
+        <rect x="332" y="34" width="62" height="26" rx="6" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="363" y="47" fill="var(--brand)">让</text>
+        <rect x="400" y="34" width="62" height="26" rx="6" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="431" y="47" fill="var(--brand)">机器</text>
+      </g>
+
+      <!-- 模型 -->
+      <rect x="60" y="92" width="402" height="40" rx="9" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+      <text x="261" y="113" font-size="11.5" fill="var(--ink-2)" text-anchor="middle" font-family="sans-serif">Transformer（因果掩码：每个位置只能看到左边）</text>
+      <g stroke="var(--line-2)" stroke-width="1.4" fill="none" marker-end="url(#arL)">
+        <line x1="91" y1="60" x2="91" y2="90"></line>
+        <line x1="159" y1="60" x2="159" y2="90"></line>
+        <line x1="227" y1="60" x2="227" y2="90"></line>
+        <line x1="295" y1="60" x2="295" y2="90"></line>
+        <line x1="363" y1="60" x2="363" y2="90"></line>
+        <line x1="431" y1="60" x2="431" y2="90"></line>
+      </g>
+
+      <!-- 输出行 -->
+      <g font-family="monospace" font-size="11.5" text-anchor="middle" dominant-baseline="central">
+        <rect x="60" y="158" width="62" height="26" rx="6" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="91" y="171" fill="var(--violet)">学习</text>
+        <rect x="128" y="158" width="62" height="26" rx="6" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="159" y="171" fill="var(--violet)">是</text>
+        <rect x="196" y="158" width="62" height="26" rx="6" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="227" y="171" fill="var(--violet)">一门</text>
+        <rect x="264" y="158" width="62" height="26" rx="6" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="295" y="171" fill="var(--violet)">让</text>
+        <rect x="332" y="158" width="62" height="26" rx="6" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="363" y="171" fill="var(--violet)">机器</text>
+        <rect x="400" y="158" width="62" height="26" rx="6" fill="var(--violet-soft)" stroke="var(--violet)"></rect>
+        <text x="431" y="171" fill="var(--violet)">从</text>
+      </g>
+      <g stroke="var(--line-2)" stroke-width="1.4" fill="none" marker-end="url(#arL)">
+        <line x1="91" y1="132" x2="91" y2="156"></line>
+        <line x1="159" y1="132" x2="159" y2="156"></line>
+        <line x1="227" y1="132" x2="227" y2="156"></line>
+        <line x1="295" y1="132" x2="295" y2="156"></line>
+        <line x1="363" y1="132" x2="363" y2="156"></line>
+        <line x1="431" y1="132" x2="431" y2="156"></line>
+      </g>
+
+      <text x="8" y="171" font-size="11" fill="var(--ink-3)" font-family="sans-serif">目标</text>
+      <text x="270" y="212" font-size="11" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">
+        每个位置都产生一个损失，全部加起来平均
+      </text>
+      <text x="270" y="230" font-size="11" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">
+        n 个 token 的文本 = n 个训练样本
+      </text>
+    </svg>
+    <div class="figure__caption">
+      <b>训练目标的构造。</b>输入和目标只差一个位置的平移。
+      一次前向传播就能同时得到 $n$ 个预测，全部参与损失计算。
+    </div>
+  </div>
+
+  <h2>11.5 损失函数：交叉熵与困惑度</h2>
+
+  <p>
+    语言模型用的损失是<strong>交叉熵</strong>（cross-entropy）。它衡量的是
+    「模型给正确答案分配的概率有多低」：
+  </p>
+
+  <div class="formula">
+    $$L = -\frac{1}{N}\sum_{i=1}^{N} \log P(w_i \mid w_{&lt;i})$$
+    <div class="formula__caption">对每个位置，取正确答案概率的对数，加负号，然后求平均</div>
+  </div>
+
+  <p>这个式子的行为很符合直觉：</p>
+
+  <ul>
+    <li>如果模型给正确答案 0.9 的概率，损失是 $-\log 0.9 = 0.105$——很小。</li>
+    <li>如果只给 0.1 的概率，损失是 $-\log 0.1 = 2.303$——很大。</li>
+    <li>如果给 0.001 的概率，损失是 6.9——惩罚非常重。</li>
+  </ul>
+
+  <p>
+    注意这里是<strong>对数</strong>：概率越低，损失增长得越快。
+    这迫使模型不敢完全排除任何一个可能的答案。
+  </p>
+
+  <h3>困惑度：一个更好理解的指标</h3>
+
+  <p>
+    交叉熵的数值不太直观，所以人们常把它取指数，得到<strong>困惑度</strong>（perplexity, PPL）：
+  </p>
+
+  <div class="formula">
+    $$\text{PPL} = e^{L}$$
+    <div class="formula__caption">可以理解为「模型在每一步平均在多少个候选词之间犹豫」</div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>交叉熵</th><th>困惑度</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>9.21</td><td>10000</td><td>随机猜（词表 10000 个词，均匀分布）</td></tr>
+        <tr><td>4.60</td><td>100</td><td>非常差的模型</td></tr>
+        <tr><td>2.30</td><td>10</td><td>一般水平</td></tr>
+        <tr><td>1.61</td><td>5</td><td>不错</td></tr>
+        <tr><td>0.69</td><td>2</td><td>非常好的模型（现代大模型的水平）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    现代大模型在英文上的困惑度通常在 2~5 之间。这意味着模型每预测一个词，
+    平均只在两三个候选之间犹豫——这已经接近人类水平了。
+  </p>
+
+  <div class="note note--math">
+    <div class="note__title"><span class="ico">∑</span>为什么困惑度有下界？</div>
+    <p>
+      语言本身是<strong>有随机性</strong>的。看到「今天天气真」，下一个字可能是
+      「好」「不错」「差」「冷」……没有人能 100% 确定。
+    </p>
+    <p>
+      这个内在的不确定性叫<strong>语言熵</strong>。英语的熵大约在 1.0~1.5 nats 左右，
+      所以困惑度的理论下界大概是 $e^{1.0} \approx 2.7$。
+      一个模型如果真的把困惑度降到 1.0，那说明它在训练集上过拟合了。
+    </p>
+  </div>
+
+  <h2>11.6 缩放律：深度学习最重要的经验规律</h2>
+
+  <p>
+    2020 年，OpenAI 的 Kaplan 等人发现了一个惊人的规律：
+    <strong>模型的性能（损失）随着规模的增长，呈现出极其平滑的幂律关系。</strong>
+  </p>
+
+  <div class="formula">
+    $$L(N, D, C) = \frac{A}{N^{\alpha}} + \frac{B}{D^{\beta}} + L_\infty$$
+    <div class="formula__caption">
+      $N$ 是参数量，$D$ 是数据量，$C$ 是算力。$\alpha \approx 0.076$，$\beta \approx 0.095$
+    </div>
+  </div>
+
+  <div class="figure">
+    <svg viewBox="0 0 480 230" role="img" aria-label="缩放律曲线：损失随算力呈幂律下降">
+      <line x1="60" y1="190" x2="450" y2="190" stroke="var(--line-2)" stroke-width="1.5"></line>
+      <line x1="60" y1="190" x2="60" y2="24" stroke="var(--line-2)" stroke-width="1.5"></line>
+      <text x="456" y="194" font-size="11" fill="var(--ink-4)" font-family="sans-serif">算力 (log)</text>
+      <text x="20" y="30" font-size="11" fill="var(--ink-4)" font-family="sans-serif">损失</text>
+
+      <path d="M70,40 C150,105 240,145 330,163 C380,171 420,175 445,177"
+            fill="none" stroke="var(--brand)" stroke-width="2.6"></path>
+      <path d="M70,40 C150,105 240,145 330,163" fill="none"
+            stroke="var(--accent)" stroke-width="2.2" stroke-dasharray="7 5"></path>
+
+      <circle cx="330" cy="163" r="5" fill="var(--accent)"></circle>
+      <text x="336" y="152" font-size="10.5" fill="var(--accent)" font-family="sans-serif">已知区域</text>
+      <text x="382" y="167" font-size="10.5" fill="var(--brand)" font-family="sans-serif">外推预测</text>
+
+      <line x1="330" y1="163" x2="330" y2="190" stroke="var(--line)" stroke-dasharray="3 3"></line>
+      <text x="330" y="206" font-size="10.5" fill="var(--ink-4)" text-anchor="middle" font-family="sans-serif">当前最大规模</text>
+
+      <text x="130" y="60" font-size="11" fill="var(--ink-3)" font-family="sans-serif">GPT-2</text>
+      <circle cx="118" cy="63" r="4" fill="var(--brand)"></circle>
+      <text x="130" y="130" font-size="11" fill="var(--ink-3)" font-family="sans-serif">GPT-3</text>
+      <circle cx="215" cy="133" r="4" fill="var(--brand)"></circle>
+    </svg>
+    <div class="figure__caption">
+      <b>缩放律。</b>在双对数坐标下，损失几乎是一条直线。
+      这意味着<strong>我们可以用较小的实验外推预测大模型的效果</strong>——
+      不需要真的训练一个万亿参数模型，也能知道它大概能到什么水平。
+    </div>
+  </div>
+
+  <p>缩放律有几个极其重要的实践含义：</p>
+
+  <ol>
+    <li>
+      <strong>投入是值得的。</strong>不存在「模型变大就没用了」的拐点——
+      至少到目前还没有看到。这直接支撑了行业里几百亿美元级别的算力投入。
+    </li>
+    <li>
+      <strong>可以提前预测。</strong>先跑一批小规模实验，
+      拟合出幂律曲线，就能预测大模型的最终效果，据此决定要不要投入。
+    </li>
+    <li>
+      <strong>参数量和数据量要一起涨。</strong>
+      2022 年的 Chinchilla 论文修正了 Kaplan 的结论：
+      当时的大模型<strong>训练数据都太少了</strong>。
+      最优的配比是「每个参数大约对应 20 个 token」。
+    </li>
+  </ol>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>模型</th><th>参数量</th><th>训练 token 数</th><th>token/参数</th><th>是否符合 Chinchilla 最优</th></tr></thead>
+      <tbody>
+        <tr><td>GPT-2</td><td>1.5B</td><td>40B</td><td>约 27</td><td>大致合理</td></tr>
+        <tr><td>GPT-3</td><td>175B</td><td>300B</td><td>约 1.7</td><td>❌ 严重欠训练</td></tr>
+        <tr><td>Chinchilla</td><td>70B</td><td>1.4T</td><td>20</td><td>✅ 理论最优</td></tr>
+        <tr><td>LLaMA-2 7B</td><td>7B</td><td>2T</td><td>约 286</td><td>远超最优（因为推理成本重要）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>为什么后来的模型都「超额训练」？</div>
+    <p>
+      Chinchilla 的结论是「在给定算力预算下，损失最小」的配比。
+      但训练完之后，模型要<strong>反复被推理几亿次</strong>。
+    </p>
+    <p>
+      推理成本正比于<strong>参数量</strong>，与训练数据量无关。
+      所以用「多喂数据、少堆参数」的方式，虽然训练时多花了点算力，
+      但换来一个更小更快的模型——从总拥有成本看划算得多。
+    </p>
+    <p>
+      这就是为什么 LLaMA 用 7B 参数吃了 2T token，
+      而它的效果能追上当年 175B 的 GPT-3。<strong>数据比参数更值钱。</strong>
+    </p>
+  </div>
+
+  <h2>11.7 涌现能力：量变引起质变</h2>
+
+  <p>
+    如果缩放律只是「平滑变好」，那它只是工程上的好消息。
+    但研究者发现了一件更奇怪的事：<strong>某些能力会突然出现。</strong>
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 460 210" role="img" aria-label="涌现能力：某些任务上准确率突然跃升">
+      <line x1="56" y1="170" x2="430" y2="170" stroke="var(--line-2)" stroke-width="1.5"></line>
+      <line x1="56" y1="170" x2="56" y2="24" stroke="var(--line-2)" stroke-width="1.5"></line>
+      <text x="436" y="174" font-size="11" fill="var(--ink-4)" font-family="sans-serif">规模</text>
+      <text x="16" y="30" font-size="11" fill="var(--ink-4)" font-family="sans-serif">准确率</text>
+      <text x="30" y="36" font-size="10" fill="var(--ink-4)" font-family="sans-serif">100%</text>
+
+      <!-- 平滑能力 -->
+      <path d="M70,140 C140,90 220,62 300,50 C350,44 390,40 420,38"
+            fill="none" stroke="var(--brand)" stroke-width="2.4"></path>
+      <text x="330" y="60" font-size="10.5" fill="var(--brand)" font-family="sans-serif">平滑提升的能力</text>
+
+      <!-- 涌现能力 -->
+      <path d="M70,166 L180,165 L230,164 L260,158 L285,110 L305,60 L330,44 C360,34 390,30 420,28"
+            fill="none" stroke="var(--accent)" stroke-width="2.6"></path>
+      <text x="180" y="192" font-size="10.5" fill="var(--accent)" font-family="sans-serif">涌现点</text>
+      <line x1="272" y1="164" x2="272" y2="170" stroke="var(--accent)" stroke-width="2"></line>
+
+      <text x="130" y="152" font-size="10.5" fill="var(--ink-4)" font-family="sans-serif">几乎为 0</text>
+      <text x="345" y="22" font-size="10.5" fill="var(--accent)" font-family="sans-serif">突然变好</text>
+    </svg>
+    <div class="figure__caption">
+      <b>涌现能力（Emergent Abilities）。</b>某些任务上，模型在小规模时表现接近随机，
+      规模跨过某个阈值后准确率突然跃升到可用水平。
+    </div>
+  </div>
+
+  <p>典型的涌现能力包括：</p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">少样本学习</div>
+      <p class="card__body">给几个例子就能做新任务，不需要微调。GPT-3 首次展示了这一点。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">思维链推理</div>
+      <p class="card__body">「让我们一步步思考」能显著提升数学和逻辑题的正确率。小模型上完全无效。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">指令遵循</div>
+      <p class="card__body">理解并执行复杂、多步骤的自然语言指令，包括隐含的约束。</p>
+    </div>
+    <div class="card">
+      <div class="card__title">代码与工具使用</div>
+      <p class="card__body">写可运行的代码、调用 API、按格式输出结构化数据。</p>
+    </div>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>对「涌现」的一个必要的怀疑</div>
+    <p>
+      2023 年有论文指出：涌现现象<strong>部分可能是度量方式造成的假象</strong>。
+      如果你用「完全正确才算对」这种严格指标，小模型几乎永远是 0 分，
+      跨过阈值后才开始有分——看起来就像突然跃升。
+      但如果改用「部分正确」的连续指标，曲线其实是平滑的。
+    </p>
+    <p>
+      所以「涌现」是否真实存在仍有争论。但无论机制如何，
+      <strong>「大规模模型能做到小模型完全做不到的事」这个现象是真实且重要的。</strong>
+    </p>
+  </div>
+
+  <h2>11.8 GPT 家族：一条清晰的技术路线</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>年份</th><th>参数量</th><th>关键突破</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>GPT-1</strong></td><td>2018</td><td>117M</td>
+          <td>证明「无监督预训练 + 有监督微调」有效。当时被 BERT 压制。</td>
+        </tr>
+        <tr>
+          <td><strong>GPT-2</strong></td><td>2019</td><td>1.5B</td>
+          <td>零样本能力。生成的新闻以假乱真，OpenAI 一度拒绝开源。</td>
+        </tr>
+        <tr>
+          <td><strong>GPT-3</strong></td><td>2020</td><td>175B</td>
+          <td><strong>少样本学习</strong>：不改参数，只给几个例子就能做新任务。范式的转折点。</td>
+        </tr>
+        <tr>
+          <td><strong>InstructGPT</strong></td><td>2022</td><td>175B</td>
+          <td>RLHF 对齐。1.3B 的对齐模型在人类偏好上超过 175B 的原始模型。</td>
+        </tr>
+        <tr>
+          <td><strong>ChatGPT</strong></td><td>2022</td><td>—</td>
+          <td>把上面所有东西包装成对话产品。两个月一亿用户。</td>
+        </tr>
+        <tr>
+          <td><strong>GPT-4</strong></td><td>2023</td><td>未公开</td>
+          <td>多模态、考试水平接近人类、推理能力大幅提升。</td>
+        </tr>
+        <tr>
+          <td><strong>GPT-4o / o1 / o3</strong></td><td>2024-2025</td><td>未公开</td>
+          <td>原生多模态；<strong>推理时计算</strong>（测试时思考更久）成为新的缩放维度。</td>
+        </tr>
+        <tr>
+          <td>开源阵营</td><td>2023-</td><td>7B~700B+</td>
+          <td>LLaMA、Qwen、DeepSeek、Mistral 等把开源模型推到了接近闭源的水平。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    注意 InstructGPT 那一行。它揭示了一个非常重要的道理：
+    <strong>预训练给你一个「会续写」的模型，对齐才给你一个「愿意帮忙」的模型。</strong>
+    前者像一个读过整个互联网但从没和人说过话的人，后者才是你能对话的助手。
+    这是第 13 章的主题。
+  </p>
+
+  <h2>11.9 自回归生成：一个字一个字地写</h2>
+
+  <p>
+    训练完之后，怎么用它生成文本？过程叫<strong>自回归生成</strong>：
+  </p>
+
+  <ol class="steps">
+    <li>
+      <strong>给一个提示（prompt）</strong>
+      <p>比如「从前有座山」。</p>
+    </li>
+    <li>
+      <strong>前向传播，得到一个概率分布</strong>
+      <p>模型输出词表里每个 token 的概率，比如「里」0.4、「上」0.2、「，」0.1……</p>
+    </li>
+    <li>
+      <strong>从分布里采样一个 token</strong>
+      <p>不是直接取概率最高的，而是按概率随机抽——这样生成才有变化。</p>
+    </li>
+    <li>
+      <strong>把它接到输入后面，重复</strong>
+      <p>输入变成「从前有座山里」，继续预测下一个。</p>
+    </li>
+  </ol>
+
+  <p>
+    每一步都要完整跑一遍前向传播。这意味着生成 500 个 token，
+    就要跑 500 次模型——这是 LLM 推理慢的根本原因。
+    第 14 章会讲 KV Cache 等加速手段。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="generate.py — 最简自回归生成">
+<script type="text/dlcode">
+import torch
+import torch.nn.functional as F
+
+@torch.no_grad()
+def generate(model, idx, max_new_tokens=100, temperature=1.0, top_k=None):
+    """
+    idx: (B, T) 的 token id，作为提示
+    """
+    for _ in range(max_new_tokens):
+        # 1) 只取最后 max_len 个 token（超出位置编码范围的要裁掉）
+        idx_cond = idx[:, -model.max_len:]
+
+        # 2) 前向传播，只要最后一个位置的输出
+        logits, _ = model(idx_cond)
+        logits = logits[:, -1, :] / temperature        # (B, vocab)
+
+        # 3) top-k 截断：只保留概率最高的 k 个
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = -float('inf')
+
+        # 4) 转成概率并采样
+        probs = F.softmax(logits, dim=-1)
+        idx_next = torch.multinomial(probs, num_samples=1)
+
+        # 5) 拼接到序列末尾，继续循环
+        idx = torch.cat([idx, idx_next], dim=1)
+
+    return idx
+
+# 使用
+prompt = torch.tensor([[1234, 5678, 9012]])       # "从前有座山" 的 token id
+out = generate(model, prompt, max_new_tokens=200, temperature=0.8, top_k=50)
+print(out.shape)   # (1, 203)
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>temperature 和 top_k 在做什么</div>
+    <p>
+      <strong>temperature</strong> 在 softmax 之前把 logits 除以 $T$：<br>
+      · $T < 1$ → 分布更尖锐，输出更确定、更保守（适合代码、数学）<br>
+      · $T > 1$ → 分布更平坦，输出更随机、更有创意（适合写诗、头脑风暴）<br>
+      · $T = 0$ → 退化成贪心搜索，每次选概率最高的词
+    </p>
+    <p>
+      <strong>top_k</strong> 只从概率最高的 $k$ 个候选里采样，
+      直接砍掉长尾里的荒谬选项。这两个参数是同一个目的：
+      <em>在「不重复」和「不胡说」之间找平衡。</em>
+    </p>
+    <p>
+      第 14 章会详细讲采样策略（还包括 top-p、重复惩罚、beam search 等）。
+    </p>
+  </div>
+
+  <div class="widget" data-widget="softmax">
+    <div class="widget__head"><span class="tag">交互 15</span>softmax 与温度：分布是怎么被「拧」出来的</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">logit · 猫</span><span class="ctrl__val" data-v="l1">3.0</span></div>
+            <input type="range" data-p="l1" min="-2" max="6" step="0.1" value="3">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">logit · 狗</span><span class="ctrl__val" data-v="l2">2.5</span></div>
+            <input type="range" data-p="l2" min="-2" max="6" step="0.1" value="2.5">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">logit · 鱼</span><span class="ctrl__val" data-v="l3">1.0</span></div>
+            <input type="range" data-p="l3" min="-2" max="6" step="0.1" value="1">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">logit · 汽车</span><span class="ctrl__val" data-v="l4">-0.5</span></div>
+            <input type="range" data-p="l4" min="-2" max="6" step="0.1" value="-0.5">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">温度 T</span><span class="ctrl__val" data-v="T">1.00</span></div>
+            <input type="range" data-p="T" min="0.1" max="2.5" step="0.05" value="1">
+          </div>
+        </div>
+        <div>
+          <div class="bars" data-role="bars"></div>
+          <div class="readout" data-role="info" style="margin-top:.9rem"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        模型输出的是 <strong>logits</strong>（未归一化的分数），
+        经过 <code>softmax(logits / T)</code> 才变成概率。
+        拖动温度，观察两件事：<strong>分布的形状</strong>和
+        <strong>熵</strong>（不确定性）。温度越低，分布越尖锐、熵越小、
+        输出越确定；温度越高，分布越平坦、熵越大、输出越随机。
+        这就是「同一个模型，换个温度就像换了个性格」的原因。
+      </p>
+    </div>
+  </div>
+
+  <h2>11.10 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">语言模型 <small>LM</small></div>
+      <div class="gloss__def">给文本序列赋予概率的模型。实践中等价于「预测下一个 token」。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">自监督 <small>self-supervised</small></div>
+      <div class="gloss__def">答案从数据本身构造（下一词），不需要人工标注。大模型数据规模的来源。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">分词 <small>tokenization / BPE</small></div>
+      <div class="gloss__def">把文本切成子词单元。高频词一个 token，低频词切成碎片。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">交叉熵 / 困惑度</div>
+      <div class="gloss__def">语言模型的损失函数。困惑度 = $e^{\text{loss}}$，可理解为「在几个候选间犹豫」。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">缩放律 <small>scaling law</small></div>
+      <div class="gloss__def">损失随参数量、数据量、算力呈幂律下降。可以外推预测大模型效果。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">自回归 <small>autoregressive</small></div>
+      <div class="gloss__def">把上一步的输出当作下一步的输入，逐 token 生成。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>语言模型 = 预测下一个 token。这个任务简单、可测量，而且答案自带。</li>
+    <li>n-gram 的三个问题是上下文短、数据稀疏、参数爆炸；神经网络用连续向量全部解决。</li>
+    <li>分词决定模型看到的世界。BPE 让高频词成为完整 token，低频词切成碎片。</li>
+    <li>交叉熵衡量「给正确答案的概率有多低」，困惑度是它的指数形式。</li>
+    <li>缩放律告诉我们：变大就变好，而且可以外推预测。这是巨额算力投入的依据。</li>
+    <li>涌现能力让「规模」从工程问题变成了科学问题——但它的真实性仍有争论。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么「预测下一个词」这个简单目标能产生翻译、推理等复杂能力？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为<strong>要准确预测下一个词，模型必须理解产生这个词的全部上下文</strong>。
+        </p>
+        <p>
+          举例：「我出生在法国，十岁搬到日本，所以我的母语是___」。
+          要填对「法语」，模型必须做实体识别（法国）、理解因果关系（出生地→母语）、
+          还要抵抗更近的干扰项（日本）。
+        </p>
+        <p>
+          这不是一个简单的任务——它<strong>隐式地包含了几乎所有语言理解任务</strong>。
+          为了让损失下降，模型被迫学会语法、语义、常识、逻辑，
+          因为这些都会影响下一个词是什么。
+        </p>
+        <p>
+          所以「简单」只是表面。真正的关键是：这是一个<strong>足够难、又足够可测量</strong>的目标函数。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>如果模型的困惑度是 1.0，说明什么？</summary>
+      <div class="quiz__answer">
+        <p>
+          困惑度 1.0 意味着交叉熵为 0，也就是模型对每一个下一个词都给出了概率 1.0。
+        </p>
+        <p>
+          这在<strong>真实数据上不可能发生</strong>，因为语言本身有内在的随机性——
+          看到「今天天气真」，下一个字可能是「好」「差」「热」，
+          没有人能 100% 确定。英语的内在熵大约在 1.0 nats 左右，
+          所以困惑度的理论下界大约是 $e^{1.0} \approx 2.7$。
+        </p>
+        <p>
+          如果真的测出 1.0，唯一的解释是<strong>过拟合或数据泄漏</strong>：
+          模型见过这些数据（或者测试集和训练集重叠了），
+          它是「背」出来的而不是「理解」出来的。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么中文的一个字通常是 1 个 token，而英文的一个词可能是 2~3 个？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为 BPE 是按<strong>字节</strong>和<strong>频率</strong>工作的，而一个汉字
+          在 UTF-8 里占 3 个字节，携带的信息量接近一个英文单词。
+        </p>
+        <p>
+          训练语料里，常用的汉字出现频率极高，很快就被合并成单个 token。
+          而英文的长词（比如 <code>tokenization</code>）虽然整体出现频率不高，
+          但它的组成碎片（<code>token</code>、<code>ization</code>）在其他词里反复出现，
+          所以会被拆成 2~3 个 token。
+        </p>
+        <p>
+          实际后果是：同样一段语义内容，中文消耗的 token 通常比英文少，
+          但因为中文 token 的「信息密度」更高，模型对每个中文 token 的建模难度也更大。
+          这是多语言模型需要专门平衡的一个问题。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>Chinchilla 的结论是什么？为什么后来的模型不遵守它？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>结论：</strong>在给定算力预算下，参数量和数据量应该<strong>等比例增长</strong>，
+          大约每个参数配 20 个 token 时损失最小。
+          当时的大模型（比如 GPT-3）数据量严重不足，属于「大而无当」。
+        </p>
+        <p>
+          <strong>为什么不遵守：</strong>Chinchilla 优化的是「训练结束时的损失」，
+          但模型的真实成本还包括<strong>推理</strong>。推理成本正比于参数量，
+          与训练数据量无关。
+        </p>
+        <p>
+          所以如果总预算有限，用「小模型 + 海量数据」的策略更划算：
+          训练时多花一点，但换来一个更小更快的模型，
+          在后续几亿次的推理中把成本赚回来。
+          LLaMA-7B 用 2T token（约 286 token/参数）就是这种思路的产物。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么问 GPT「strawberry 里有几个 r」，它经常答错？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>因为它根本看不到字母。</strong>
+        </p>
+        <p>
+          模型看到的是 token，而 <code>strawberry</code> 在 GPT 的分词器里可能被切成
+          <code>str</code> + <code>aw</code> + <code>berry</code> 这样的碎片。
+          它拿到的是 3 个整数 ID，而不是 10 个字符。
+        </p>
+        <p>
+          「数有几个 r」是一个<strong>字符级操作</strong>，
+          而模型的表示里压根没有字符这一层。它只能靠记忆里的相似模式去猜。
+        </p>
+        <p>
+          这不是「模型不够聪明」，而是<strong>表示层面的限制</strong>。
+          解决办法包括：改用字符级处理、让它写代码来数、
+          或者用「思考型」模型在推理时展开中间步骤。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    到这里，第四部分结束了。你现在完整理解了：注意力、Transformer、GPT，
+    以及「预测下一个词」这个目标为什么能产生智能。
+  </p>
+
+  <p>
+    但这一切的前提是——你得真的把它训练出来。
+    一个万亿参数的模型，需要几万张 GPU 连续跑几个月，
+    电费上千万美元，中间任何一个环节出问题都可能导致训练失败。
+  </p>
+
+  <p>
+    第五部分讲的是<strong>大模型工程</strong>：数据怎么清洗、
+    几万张卡怎么协同（数据并行、张量并行、流水并行）、
+    混合精度怎么保证数值稳定、以及一次训练到底要花多少钱。
+    这一部分是纯粹的工程，但正是这些工程能力，把「理论上可行」变成了「现实中做得到」。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

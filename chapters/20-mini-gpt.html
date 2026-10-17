@@ -1,0 +1,1575 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 20 章 · 从零实现 mini-GPT — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="20">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 20 章 · 第七部 实践与前沿</span>
+    <h1>从零实现 mini-GPT</h1>
+    <p class="chapter-head__lead">
+      前面十九章讲了所有的零件，这一章把它们<strong>装成一台真的能跑的机器</strong>。
+      只用 NumPy，约 300 行代码，包含一个手写的自动微分引擎、
+      一个 4 层 4 头的 GPT、一个 AdamW 优化器，
+      以及训练和采样的完整流程。
+      跑完之后你会得到一个能生成通顺中文的小模型——
+      更重要的是，<strong>你会发现自己突然看懂了一切</strong>。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 45 分钟</span>
+      <span>🎯 亲手实现并训练一个能生成文本的 GPT</span>
+      <span>🧪 约 300 行可运行代码</span>
+    </div>
+  </header>
+
+  <h2>20.1 为什么值得亲手写一遍</h2>
+
+  <p>
+    你大概已经读过不少「从零实现 GPT」的教程。但大多数有两种问题：
+    要么用了几百行框架代码，把真正重要的部分（梯度怎么流）藏起来了；
+    要么跳过了关键细节，让你复制粘贴之后仍然不知道发生了什么。
+  </p>
+
+  <p>
+    这一章的不同在于：<strong>我们要自己实现反向传播。</strong>
+    不是调用 <code>loss.backward()</code> 就完事，
+    而是亲手写清楚「每个算子的梯度是什么」，
+    然后看着梯度沿着计算图从输出层一路流回输入层。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">为什么这一步不可跳过</div>
+    <p>
+      因为第 5 章讲的反向传播，只有在你自己实现过一次之后，
+      才会从「我知道这个概念」变成「我知道它在干什么」。
+    </p>
+    <p>
+      你会亲眼看到：
+      <strong>① 计算图是在前向过程中动态建起来的</strong>；
+      <strong>② 反向传播必须按拓扑序进行</strong>，顺序错了梯度就是错的；
+      <strong>③ 每个算子只需要知道「局部导数」</strong>，
+      链式法则负责把整条链串起来；
+      <strong>④ 梯度是累加的</strong>，所以每一轮开始必须清零。
+    </p>
+    <p>
+      这四件事，是理解所有深度学习框架的钥匙。
+      写过一次之后，PyTorch 对你来说就不再是黑箱了。
+    </p>
+  </div>
+
+  <p>
+    我们最终要跑出来的东西长这样：
+  </p>
+
+  <div class="codeblock" data-lang="bash" data-title="目标：训练一个字符级中文 GPT">
+<script type="text/dlcode">
+$ python mini_gpt.py
+语料 2574 字 · 词表 357 · train 2316 / val 258
+参数量 847.2K
+  step    0  loss 5.8959  val 5.7376  0.5s
+  step  100  loss 0.1863  val 0.2170  4.2s
+  step  200  loss 0.0975  val 0.0955  7.7s
+  step  300  loss 0.0534  val 0.0549  12.0s
+  step  400  loss 0.0526  val 0.0548  15.6s
+  step  500  loss 0.0505  val 0.0457  19.3s
+  step  600  loss 0.0401  val 0.0710  24.0s
+
+训练完成。采样三段看看效果：
+
+[temperature=0.5] 深度学习是机器学习的一个分支，它使用多层神经网络从数据中学习表示。
+                 神经网络由许多神经元组成，每个神经元接收输入，做加权求和，
+[temperature=1.0] 深度学习是机器学习的请求。人类反馈强化学习用偏好数据进一步打磨模型的输出风格。
+                 检索增强生成先从知识库找出相关段落，再让模型基于这些段落回答。
+</script>
+  </div>
+
+  <p>
+    24 秒、纯 NumPy、单核 CPU。这就是全部。下面开始动手。
+  </p>
+
+  <h2>20.2 全局地图</h2>
+
+  <p>
+    先把整条链路画出来。这张图和下面的六段代码是一一对应的，
+    建议你先记住这个结构，再看代码。
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 540 400" role="img" aria-label="mini-GPT 的完整数据流">
+      <defs>
+        <marker id="ar20a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--brand)"></path>
+        </marker>
+        <marker id="ar20b" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+      <g font-family="sans-serif">
+        <!-- 输入 -->
+        <rect x="14" y="14" width="150" height="34" rx="7" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="89" y="36" font-size="10.5" fill="var(--ink-2)" text-anchor="middle">文本 "深度学习是…"</text>
+        <rect x="14" y="56" width="150" height="34" rx="7" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="89" y="78" font-size="10.5" fill="var(--ink-2)" text-anchor="middle">字符级分词 → [10,6,5,2]</text>
+        <line x1="89" y1="48" x2="89" y2="54" stroke="var(--brand)" stroke-width="1.4" marker-end="url(#ar20a)"></line>
+
+        <!-- 嵌入 -->
+        <rect x="14" y="106" width="150" height="52" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="89" y="126" font-size="10.5" font-weight="700" fill="var(--brand)" text-anchor="middle">词嵌入 wte + 位置嵌入 wpe</text>
+        <text x="89" y="144" font-size="9" fill="var(--ink-3)" text-anchor="middle">(B,T) → (B,T,C)</text>
+        <line x1="89" y1="90" x2="89" y2="104" stroke="var(--brand)" stroke-width="1.4" marker-end="url(#ar20a)"></line>
+
+        <!-- Block -->
+        <rect x="14" y="176" width="150" height="150" rx="8" fill="var(--violet-soft)" stroke="color-mix(in srgb, var(--violet) 30%, transparent)"></rect>
+        <text x="89" y="194" font-size="10" font-weight="700" fill="var(--violet)" text-anchor="middle">× 4 个 Transformer 块</text>
+        <line x1="26" y1="204" x2="152" y2="204" stroke="color-mix(in srgb, var(--violet) 25%, transparent)"></line>
+        <text x="89" y="222" font-size="9.5" fill="var(--ink-2)" text-anchor="middle">LayerNorm</text>
+        <text x="89" y="240" font-size="9.5" font-weight="700" fill="var(--ink)" text-anchor="middle">多头因果自注意力</text>
+        <text x="89" y="256" font-size="8.5" fill="var(--ink-4)" text-anchor="middle">q·kᵀ/√d + mask → softmax</text>
+        <text x="89" y="274" font-size="9.5" fill="var(--brand)" text-anchor="middle">+ 残差</text>
+        <text x="89" y="292" font-size="9.5" fill="var(--ink-2)" text-anchor="middle">LayerNorm</text>
+        <text x="89" y="310" font-size="9.5" font-weight="700" fill="var(--ink)" text-anchor="middle">前馈网络 (4×) + GELU</text>
+        <line x1="89" y1="158" x2="89" y2="174" stroke="var(--brand)" stroke-width="1.4" marker-end="url(#ar20a)"></line>
+
+        <!-- 输出头 -->
+        <rect x="200" y="216" width="150" height="52" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="275" y="236" font-size="10.5" font-weight="700" fill="var(--brand)" text-anchor="middle">末端 LayerNorm</text>
+        <text x="275" y="254" font-size="9" fill="var(--ink-3)" text-anchor="middle">→ 乘 wte 的转置（权重共享）</text>
+        <line x1="166" y1="251" x2="198" y2="251" stroke="var(--brand)" stroke-width="1.4" marker-end="url(#ar20a)"></line>
+
+        <rect x="200" y="284" width="150" height="42" rx="7" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="275" y="302" font-size="10.5" fill="var(--ink-2)" text-anchor="middle">logits (B*T, 词表大小)</text>
+        <text x="275" y="318" font-size="9" fill="var(--ink-4)" text-anchor="middle">每个位置一个分数分布</text>
+        <line x1="275" y1="270" x2="275" y2="282" stroke="var(--brand)" stroke-width="1.4" marker-end="url(#ar20a)"></line>
+
+        <!-- 两条路 -->
+        <rect x="386" y="200" width="140" height="60" rx="7" fill="var(--ok-soft)" stroke="color-mix(in srgb, var(--ok) 30%, transparent)"></rect>
+        <text x="456" y="220" font-size="10" font-weight="700" fill="var(--ok)" text-anchor="middle">训练：交叉熵损失</text>
+        <text x="456" y="236" font-size="9" fill="var(--ink-2)" text-anchor="middle">与真实下一个字比较</text>
+        <text x="456" y="252" font-size="9" fill="var(--ink-3)" text-anchor="middle">→ backward()</text>
+        <line x1="352" y1="292" x2="380" y2="240" stroke="var(--ok)" stroke-width="1.4" marker-end="url(#ar20a)"></line>
+
+        <rect x="386" y="284" width="140" height="60" rx="7" fill="var(--accent-soft)" stroke="color-mix(in srgb, var(--accent) 30%, transparent)"></rect>
+        <text x="456" y="304" font-size="10" font-weight="700" fill="var(--accent)" text-anchor="middle">推理：采样下一个字</text>
+        <text x="456" y="320" font-size="9" fill="var(--ink-2)" text-anchor="middle">softmax + 温度 + Top-K</text>
+        <text x="456" y="336" font-size="9" fill="var(--ink-3)" text-anchor="middle">→ 拼回输入，循环</text>
+        <line x1="352" y1="306" x2="380" y2="306" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#ar20b)"></line>
+
+        <!-- 反传 -->
+        <path d="M386,214 C 330,180 250,120 170,110" fill="none" stroke="var(--ok)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar20a)"></path>
+        <text x="300" y="150" font-size="9.5" fill="var(--ok)" text-anchor="middle">梯度沿原路返回，更新每一个参数</text>
+
+        <text x="270" y="384" font-size="10.5" fill="var(--ink-3)" text-anchor="middle">前向：数据往上走 · 反向：梯度沿同一条路走回来</text>
+      </g>
+    </svg>
+  </div>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th style="width:14%">代码段</th><th style="width:26%">对应本书章节</th><th>职责</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>① Tensor</strong></td><td>第 5 章 反向传播</td><td>自动微分引擎：记录计算图、按拓扑序回传梯度</td></tr>
+      <tr><td><strong>② 融合算子</strong></td><td>第 5 / 9 章</td><td>softmax、layernorm、gelu、embedding、交叉熵的手写反向</td></tr>
+      <tr><td><strong>③ GPT</strong></td><td>第 9 / 10 章</td><td>嵌入、多头因果注意力、前馈、残差、权重共享</td></tr>
+      <tr><td><strong>④ AdamW</strong></td><td>第 4 章</td><td>带动量与二阶矩估计的优化器，解耦权重衰减</td></tr>
+      <tr><td><strong>⑤ 分词与取样</strong></td><td>第 11 章</td><td>字符级词表、随机切片段作为训练批次</td></tr>
+      <tr><td><strong>⑥ 训练与采样</strong></td><td>第 14 章</td><td>训练循环、梯度裁剪、温度与 Top-K 采样</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>20.3 第一段：自动微分引擎</h2>
+
+  <p>
+    这是整章最核心的部分。它的想法只有一句话：
+    <strong>每个 Tensor 记住「我是从谁算出来的」，
+    并注册一个「怎么把梯度传回去」的函数。</strong>
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="① Tensor：计算图的一个节点">
+<script type="text/dlcode">
+_GRAD_ON = True          # 推理时置 False，可以省掉建图的开销
+
+
+class Tensor:
+    """一个带梯度的 n 维数组。只实现 GPT 需要的那些算子。"""
+
+    def __init__(self, data, requires_grad=False, _prev=(), _op=''):
+        self.data = np.asarray(data, dtype=np.float32)
+        self.requires_grad = requires_grad
+        # _prev 就是计算图里的「父节点」——这个 tensor 是由它们算出来的
+        self._prev = tuple(_prev) if _GRAD_ON else ()
+        self._op = _op
+        self._backward = lambda: None
+        # 参数一定需要梯度；中间激活只在开启梯度时分配
+        self.grad = (np.zeros_like(self.data)
+                     if (requires_grad or _GRAD_ON) else None)
+
+    @property
+    def shape(self):
+        return self.data.shape
+</script>
+  </div>
+
+  <p>
+    注意 <code>requires_grad</code> 的传播。
+    这是一个非常容易写错、而且错了之后<strong>不会报错只会静默失败</strong>的地方：
+    如果算子的输出没有继承输入的 <code>requires_grad</code>，
+    那么反向传播时每一层的 <code>if self.requires_grad</code> 判断都会跳过，
+    最终所有参数梯度全是 0。
+  </p>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>我在写这份代码时踩过的真实坑</div>
+    <p>
+      第一版里我把算子写成 <code>out = Tensor(self.data + other.data, _prev=(self, other))</code>，
+      忘了传 <code>requires_grad</code>。结果：
+      训练不报错、损失完全不动、梯度范数精确等于 <code>0.0</code>。
+    </p>
+    <p>
+      排查了很久才发现：<strong>中间结果的 requires_grad 默认是 False</strong>，
+      所以「把梯度累加给父节点」的代码一次都没有执行。
+    </p>
+    <p>
+      这个坑值得记住，因为它揭示了一件事：
+      <em>自动微分系统里的 bug，大多数是「静默的」。</em>
+      这也是为什么后面 20.10 要专门讲梯度检查——
+      那是唯一能可靠抓住这类 bug 的手段。
+    </p>
+  </div>
+
+  <p>
+    接下来是三个基础算子。每个算子只做两件事：
+    <strong>算出前向结果，写清楚反向怎么传。</strong>
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="加法、乘法、矩阵乘法">
+<script type="text/dlcode">
+    # ---------- 加法（支持广播）----------
+    def __add__(self, other):
+        other = other if isinstance(other, Tensor) else Tensor(other)
+        out = Tensor(self.data + other.data,
+                     requires_grad=(self.requires_grad or other.requires_grad),
+                     _prev=(self, other), _op='add')
+
+        def _backward():
+            # 加法的局部导数是 1，所以梯度原样传回去
+            # 唯一要做的是「反广播」：把被复制过的维度加起来
+            if self.requires_grad:
+                self.grad += _unbroadcast(out.grad, self.data.shape)
+            if other.requires_grad:
+                other.grad += _unbroadcast(out.grad, other.data.shape)
+        out._backward = _backward
+        return out
+
+    def __radd__(self, other):
+        return self + other
+
+    # ---------- 逐元素乘法（支持广播）----------
+    def __mul__(self, other):
+        other = other if isinstance(other, Tensor) else Tensor(other)
+        out = Tensor(self.data * other.data,
+                     requires_grad=(self.requires_grad or other.requires_grad),
+                     _prev=(self, other), _op='mul')
+
+        def _backward():
+            # 乘法的局部导数「交叉」：对 a 求导得 b，对 b 求导得 a
+            if self.requires_grad:
+                self.grad += _unbroadcast(out.grad * other.data, self.data.shape)
+            if other.requires_grad:
+                other.grad += _unbroadcast(out.grad * self.data, other.data.shape)
+        out._backward = _backward
+        return out
+
+    # ---------- 矩阵乘法（支持批量与广播）----------
+    def __matmul__(self, other):
+        out = Tensor(self.data @ other.data,
+                     requires_grad=(self.requires_grad or other.requires_grad),
+                     _prev=(self, other), _op='matmul')
+
+        def _backward():
+            # dL/dA = G @ Bᵀ        dL/dB = Aᵀ @ G
+            # 这两行就是第 3 章那个「矩阵形式的反向传播」
+            if self.requires_grad:
+                g = out.grad @ other.data.swapaxes(-1, -2)
+                self.grad += _unbroadcast(g, self.data.shape)
+            if other.requires_grad:
+                g = self.data.swapaxes(-1, -2) @ out.grad
+                other.grad += _unbroadcast(g, other.data.shape)
+        out._backward = _backward
+        return out
+</script>
+  </div>
+
+  <p>
+    三个算子全部加起来不到 40 行。而 GPT 的所有计算，
+    都是这三个算子的组合。这就是「简单零件 × 巨大规模」的具体含义。
+  </p>
+
+  <p>
+    <code>_unbroadcast</code> 是唯一一个不那么直观的辅助函数。
+    它的存在是因为 NumPy 的广播：一个 <code>(C,)</code> 的偏置加到
+    <code>(B*T, C)</code> 上时，偏置被复制了 <code>B*T</code> 份。
+    反向传播时这些复制品都要把梯度还回来，所以要<strong>求和</strong>。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="反广播 + 拓扑序反向传播">
+<script type="text/dlcode">
+def _unbroadcast(g, shape):
+    """把广播后的梯度缩回原始形状。"""
+    while g.ndim > len(shape):
+        g = g.sum(axis=0)
+    for i, s in enumerate(shape):
+        if s == 1 and g.shape[i] != 1:
+            g = g.sum(axis=i, keepdims=True)
+    return g
+
+
+class Tensor:                      # 续
+    def backward(self):
+        # 第一步：拓扑排序。必须保证「所有下游都算完了」才轮到当前节点，
+        # 否则拿到的 out.grad 是不完整的。
+        topo, seen = [], set()
+
+        def build(t):
+            if id(t) in seen:
+                return
+            seen.add(id(t))
+            for c in t._prev:
+                build(c)
+            topo.append(t)
+
+        build(self)
+        self.grad = np.ones_like(self.data)      # 损失的梯度种子是 1
+        for t in reversed(topo):
+            t._backward()
+</script>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◆</span>为什么必须按拓扑序反向</div>
+    <p>
+      因为一个节点可能被<strong>多个下游节点使用</strong>。
+      比如残差连接里的 <code>x</code>，它既进了 LayerNorm，又直接加到了输出上。
+      所以 <code>x.grad</code> 必须等两条路径都把梯度累加完，才能继续往前传。
+    </p>
+    <p>
+      如果顺序错了，<code>x</code> 可能只用到了一部分梯度就往前传，
+      结果<strong>不报错、但梯度是错的</strong>——训练会变慢甚至完全不收敛。
+    </p>
+    <p>
+      顺便注意 <code>self.grad += </code> 里的那个「+=」：
+      <strong>梯度永远是累加，不是覆盖。</strong>
+      这也解释了为什么每一轮训练开始前必须 <code>zero_grad()</code>——
+      否则上一轮的梯度会残留下来，越滚越大。
+    </p>
+  </div>
+
+  <h2>20.4 第二段：融合算子——手写反向</h2>
+
+  <p>
+    有了基础算子还不够。<code>softmax</code>、<code>layernorm</code>、
+    <code>gelu</code>、交叉熵这些算子，如果拆成基础运算去写，
+    既啰嗦又慢。所以它们被实现成「融合算子」：
+    <strong>一个前向 + 一个手写反向。</strong>
+  </p>
+
+  <p>
+    这一段的每一行都需要你自己推导导数。我把推导过程留在注释里。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="softmax 与 layernorm">
+<script type="text/dlcode">
+def softmax(x):
+    """沿最后一维做 softmax。
+
+    推导：y = softmax(x)，则 dL/dx_i = Σ_j (dL/dy_j) · y_j · (δ_ij − y_i)
+    写成矩阵形式就是：dx = y * (g − Σ(g·y))
+    """
+    m = x.data.max(axis=-1, keepdims=True)      # 减去最大值，防止 exp 溢出
+    e = np.exp(x.data - m)
+    y = e / e.sum(axis=-1, keepdims=True)
+    out = Tensor(y, requires_grad=x.requires_grad, _prev=(x,), _op='softmax')
+
+    def _backward():
+        if x.requires_grad:
+            x.grad += y * (out.grad - (out.grad * y).sum(axis=-1, keepdims=True))
+    out._backward = _backward
+    return out
+
+
+def layernorm(x, gamma, beta, eps=1e-5):
+    """对最后一维做归一化，再仿射变换：y = γ·(x−μ)/σ + β
+
+    反向推导比较绕，因为 μ 和 σ 本身也依赖 x。
+    拆成三部分：d(x̂) + d(σ) + d(μ)，最后合起来。
+    """
+    mu = x.data.mean(axis=-1, keepdims=True)
+    var = x.data.var(axis=-1, keepdims=True)
+    std = np.sqrt(var + eps)
+    xhat = (x.data - mu) / std
+    out = Tensor(xhat * gamma.data + beta.data,
+                 requires_grad=(x.requires_grad or gamma.requires_grad
+                                or beta.requires_grad),
+                 _prev=(x, gamma, beta), _op='layernorm')
+    D = x.data.shape[-1]
+
+    def _backward():
+        g = out.grad
+        if gamma.requires_grad:                      # 对 γ 求导
+            gamma.grad += (g * xhat).reshape(-1, D).sum(axis=0)
+        if beta.requires_grad:                       # 对 β 求导
+            beta.grad += g.reshape(-1, D).sum(axis=0)
+        if x.requires_grad:
+            dxhat = g * gamma.data
+            dvar = (dxhat * (x.data - mu) * -0.5 * std ** -3).sum(-1, keepdims=True)
+            dmu = ((dxhat * -1.0 / std).sum(-1, keepdims=True)
+                   + dvar * (-2.0 * (x.data - mu)).sum(-1, keepdims=True) / D)
+            x.grad += dxhat / std + dvar * 2.0 * (x.data - mu) / D + dmu / D
+    out._backward = _backward
+    return out
+</script>
+  </div>
+
+  <p>
+    剩下的三个算子思路相同：
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="GELU、embedding、交叉熵">
+<script type="text/dlcode">
+def gelu(x):
+    """tanh 近似的 GELU。d/dx 直接对表达式求导即可。"""
+    c = 0.7978845608
+    xd = x.data
+    t = np.tanh(c * (xd + 0.044715 * xd ** 3))
+    out = Tensor(0.5 * xd * (1.0 + t), requires_grad=x.requires_grad,
+                 _prev=(x,), _op='gelu')
+    d = 0.5 * (1.0 + t) + 0.5 * xd * (1.0 - t * t) * c * (1 + 3 * 0.044715 * xd * xd)
+
+    def _backward():
+        if x.requires_grad:
+            x.grad += out.grad * d
+    out._backward = _backward
+    return out
+
+
+def embedding(W, idx):
+    """查表：从 W 里按 idx 取出若干行。反向就是「把梯度散回对应的行」。"""
+    out = Tensor(W.data[idx], requires_grad=W.requires_grad,
+                 _prev=(W,), _op='embedding')
+
+    def _backward():
+        if W.requires_grad:
+            # 注意用 add.at 而不是索引赋值：同一个词可能出现多次，梯度要累加
+            np.add.at(W.grad, idx.reshape(-1),
+                      out.grad.reshape(-1, W.data.shape[1]))
+    out._backward = _backward
+    return out
+
+
+def cross_entropy(logits, targets):
+    """logits: (N, V)  targets: (N,)  返回标量平均损失。
+
+    交叉熵的梯度漂亮得让人意外：
+    dL/dlogits = softmax(logits) − onehot(targets)
+    """
+    x = logits.data
+    m = x.max(axis=-1, keepdims=True)
+    e = np.exp(x - m)
+    p = e / e.sum(axis=-1, keepdims=True)
+    N = targets.size
+    flat = p.reshape(-1, p.shape[-1])
+    rows = np.arange(N)
+    loss = float(-np.log(flat[rows, targets.reshape(-1)] + 1e-9).mean())
+
+    out = Tensor(loss, requires_grad=logits.requires_grad,
+                 _prev=(logits,), _op='ce')
+
+    def _backward():
+        if logits.requires_grad:
+            d = p.copy()
+            d.reshape(-1, p.shape[-1])[rows, targets.reshape(-1)] -= 1.0
+            logits.grad += d / N
+    out._backward = _backward
+    return out
+</script>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◆</span>「softmax − onehot」为什么这么美</div>
+    <p>
+      这个梯度公式值得停下来看一会儿。它说的是：
+    </p>
+    <p>
+      <strong>对每个位置，把「模型预测的概率分布」减去「真实答案的 one-hot」，
+      就是梯度。</strong>
+    </p>
+    <p>
+      如果模型预测对了（预测 0.9，真实是 1.0），梯度是 −0.1，
+      方向是「减小这个位置的分数」——因为已经足够自信了，不用再推。
+      如果预测错了（预测 0.1，真实是 1.0），梯度是 +0.9，
+      方向是「增大这个位置的分数」，而且力度很大。
+    </p>
+    <p>
+      更妙的是：<strong>模型错得越离谱，梯度越大。</strong>
+      这个「按错误程度自动调整力度」的性质，
+      让交叉熵成为分类任务几乎默认的损失函数。
+    </p>
+    <p>
+      它还有一个工程上的好处：数值稳定。
+      <code>log</code> 和 <code>softmax</code> 被合在一起计算，
+      避免了先算 softmax 再取 log 时的小数下溢问题。
+    </p>
+  </div>
+
+  <h2>20.5 第三段：模型</h2>
+
+  <p>
+    现在开始搭 GPT。参数初始化、嵌入、注意力、前馈、残差，
+    全部在下面这一百行里。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="GPT 的构造：参数与因果掩码">
+<script type="text/dlcode">
+class GPT:
+    def __init__(self, vocab_size, block=64, n_embd=128, n_head=4,
+                 n_layer=4, seed=0):
+        assert n_embd % n_head == 0
+        rng = np.random.default_rng(seed)
+        self.vocab_size = vocab_size
+        self.block, self.n_embd, self.n_head, self.n_layer = \
+            block, n_embd, n_head, n_layer
+        self.hd = n_embd // n_head              # 每个头的维度
+
+        def param(*shape, scale=0.02):
+            return Tensor(rng.normal(0, scale, size=shape), requires_grad=True)
+
+        def zeros(*shape):
+            return Tensor(np.zeros(shape, np.float32), requires_grad=True)
+
+        def ones(n):
+            return Tensor(np.ones(n, np.float32), requires_grad=True)
+
+        # 词嵌入 + 位置嵌入
+        self.wte = param(vocab_size, n_embd)
+        self.wpe = param(block, n_embd)
+
+        # 因果掩码：上三角（不含对角线）全部填 -1e9
+        # 存成普通 numpy 数组，用到时再包成 Tensor（它是常数，不需要梯度）
+        self.mask = np.triu(np.ones((block, block), np.float32), 1) * -1e9
+
+        # n_layer 个 Transformer 块
+        self.blocks = []
+        for _ in range(n_layer):
+            self.blocks.append({
+                'ln1g': ones(n_embd), 'ln1b': zeros(n_embd),
+                'wq': param(n_embd, n_embd), 'bq': zeros(n_embd),
+                'wk': param(n_embd, n_embd), 'bk': zeros(n_embd),
+                'wv': param(n_embd, n_embd), 'bv': zeros(n_embd),
+                # 输出投影用更小的初始化：残差分支的方差要压住
+                'wo': param(n_embd, n_embd, scale=0.02 / np.sqrt(2 * n_layer)),
+                'bo': zeros(n_embd),
+                'ln2g': ones(n_embd), 'ln2b': zeros(n_embd),
+                'w1': param(n_embd, 4 * n_embd), 'b1': zeros(4 * n_embd),
+                'w2': param(4 * n_embd, n_embd,
+                            scale=0.02 / np.sqrt(2 * n_layer)),
+                'b2': zeros(n_embd),
+            })
+
+        # 末端 LayerNorm。注意没有单独的 lm_head：
+        # 输出投影直接复用 wte 的转置（权重共享），能省一半参数。
+        self.lnfg = ones(n_embd)
+        self.lnfb = zeros(n_embd)
+
+    def parameters(self):
+        ps = [self.wte, self.wpe, self.lnfg, self.lnfb]
+        for b in self.blocks:
+            ps.extend(b.values())
+        return ps
+
+    def num_params(self):
+        return sum(p.data.size for p in self.parameters())
+</script>
+  </div>
+
+  <p>
+    这里有三个设计决策值得单独说清楚，因为它们是「能训起来」的关键。
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">① 权重共享</div>
+      <p class="card__body">
+        输入嵌入 <code>wte</code> 是 <code>(V, C)</code>，
+        输出要 <code>(C, V)</code>——正好是它的转置。
+        <strong>不新增参数，直接复用。</strong>
+        直觉上说得通：把「词→向量」的映射反过来用，
+        就是「向量→词」的映射。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">② 残差分支的缩放</div>
+      <p class="card__body">
+        注意 <code>wo</code> 和 <code>w2</code> 的初始化是
+        <code>0.02 / √(2·n_layer)</code>，比别的小。
+        因为残差是<strong>加法</strong>：层数越多，
+        加进去的分支就越多，如果不缩放，激活值会随深度线性增长。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">③ 掩码用 −1e9</div>
+      <p class="card__body">
+        不能填 <code>−inf</code>：<code>exp(−inf)</code> 在某些情况下会产出
+        <code>NaN</code>（比如和 0 相乘时）。
+        用一个大负数就足够让 softmax 后变成 0，而且数值安全。
+      </p>
+    </div>
+  </div>
+
+  <div class="codeblock" data-lang="python" data-title="注意力：多头 + 因果掩码">
+<script type="text/dlcode">
+    def attention(self, x, blk, B, T):
+        """多头因果自注意力。x 的形状是 (B*T, C)。"""
+        C, H, hd = self.n_embd, self.n_head, self.hd
+
+        def heads(proj, bias):
+            y = x @ proj + bias                       # (B*T, C)
+            y = y.reshape(B, T, H, hd)                # 把 C 拆成 H 个头
+            return y.transpose((0, 2, 1, 3))          # (B, H, T, hd)
+
+        q = heads(blk['wq'], blk['bq'])
+        k = heads(blk['wk'], blk['bk'])
+        v = heads(blk['wv'], blk['bv'])
+
+        # 打分：(B,H,T,hd) @ (B,H,hd,T) -> (B,H,T,T)
+        scores = (q @ k.transpose((0, 1, 3, 2))) * (1.0 / np.sqrt(hd))
+        scores = scores + Tensor(self.mask[:T, :T])   # 屏蔽未来位置
+        attn = softmax(scores)                        # 每一行归一化成权重
+
+        out = attn @ v                                # (B,H,T,hd)
+        out = out.transpose((0, 2, 1, 3)).reshape(B * T, C)   # 合并多头
+        return out @ blk['wo'] + blk['bo']
+</script>
+  </div>
+
+  <p>
+    这一段和第 9、10 章讲的完全是同一件事，只是现在它变成了可执行的代码。
+    把 <code>q @ k.transpose(...)</code> 这一行和
+    <code>scores = QKᵀ/√d</code> 那个公式对照着看，你会觉得它们本来就该是同一行。
+  </p>
+
+  <p>
+    形状变换是这里最容易出错的地方，建议用一句话记住它：
+    <strong>「C 拆成 H×hd，把 H 提到 batch 维旁边，算完再变回来」。</strong>
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="前向传播与采样">
+<script type="text/dlcode">
+    @staticmethod
+    def mlp(x, blk):
+        return gelu(x @ blk['w1'] + blk['b1']) @ blk['w2'] + blk['b2']
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        x = embedding(self.wte, idx)                  # (B, T, C)
+        x = x + embedding(self.wpe, np.arange(T))     # 加上位置信息
+        x = x.reshape(B * T, self.n_embd)             # 之后全程用 (B*T, C)
+
+        for blk in self.blocks:
+            # Pre-LN + 残差：先归一化再进子层，最后加回原输入
+            x = x + self.attention(layernorm(x, blk['ln1g'], blk['ln1b']),
+                                   blk, B, T)
+            x = x + self.mlp(layernorm(x, blk['ln2g'], blk['ln2b']), blk)
+
+        x = layernorm(x, self.lnfg, self.lnfb)
+        logits = x @ self.wte.transpose((1, 0))       # (B*T, V)，权重共享
+
+        if targets is None:
+            return logits
+        loss = cross_entropy(logits, targets.reshape(-1))
+        return logits, loss
+
+    def generate(self, idx, max_new_tokens, temperature=0.8, top_k=None,
+                 rng=None):
+        rng = rng or np.random.default_rng(0)
+        idx = idx.copy()
+        with no_grad():                               # 推理不需要建图
+            for _ in range(max_new_tokens):
+                cond = idx[:, -self.block:]           # 只保留最后 block 个 token
+                logits = self.forward(cond)
+                logits = logits.reshape(cond.shape[0], cond.shape[1], -1)
+                last = logits.data[:, -1, :] / max(temperature, 1e-6)
+
+                if top_k is not None:                 # 只保留概率最高的 k 个
+                    kth = np.sort(last, axis=-1)[:, -top_k][:, None]
+                    last = np.where(last < kth, -np.inf, last)
+
+                last = last - last.max(axis=-1, keepdims=True)
+                p = np.exp(last)
+                p = p / p.sum(axis=-1, keepdims=True)
+                nxt = np.array([rng.choice(len(row), p=row) for row in p])
+                idx = np.concatenate([idx, nxt[:, None]], axis=1)
+        return idx
+</script>
+  </div>
+
+  <p>
+    注意 <code>forward</code> 里那个 <code>x = x.reshape(B*T, C)</code>。
+    这个「把 batch 和序列长度压平」的技巧让后面所有计算都变成二维矩阵乘法，
+    代码短了很多，也更好读。
+  </p>
+
+  <h2>20.6 第四段：AdamW 优化器</h2>
+
+  <p>
+    第 4 章讲过 Adam 和 AdamW 的区别。这里把它实现出来——
+    只有 25 行。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="AdamW">
+<script type="text/dlcode">
+class AdamW:
+    def __init__(self, params, lr=3e-3, betas=(0.9, 0.95), eps=1e-8,
+                 weight_decay=0.01):
+        self.params = list(params)
+        self.lr, self.betas, self.eps = lr, betas, eps
+        self.wd = weight_decay
+        self.t = 0
+        self.m = [np.zeros_like(p.data) for p in self.params]   # 一阶矩
+        self.v = [np.zeros_like(p.data) for p in self.params]   # 二阶矩
+
+    def zero_grad(self):
+        for p in self.params:
+            p.grad.fill(0.0)          # 必须清零，因为梯度是累加的
+
+    def step(self):
+        self.t += 1
+        b1, b2 = self.betas
+        for i, p in enumerate(self.params):
+            g = p.grad
+            # 一阶矩：梯度的指数滑动平均，相当于「动量」
+            self.m[i] = b1 * self.m[i] + (1 - b1) * g
+            # 二阶矩：梯度平方的指数滑动平均，用来给每个参数单独缩放步长
+            self.v[i] = b2 * self.v[i] + (1 - b2) * g * g
+            # 偏差修正：前几步 m 和 v 都接近 0，必须修正，否则步长会过小
+            mhat = self.m[i] / (1 - b1 ** self.t)
+            vhat = self.v[i] / (1 - b2 ** self.t)
+            # 解耦权重衰减：直接作用在参数上，不进入梯度
+            p.data -= self.lr * (mhat / (np.sqrt(vhat) + self.eps)
+                                 + self.wd * p.data)
+</script>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◆</span>AdamW 到底在做什么</div>
+    <p>
+      把 <code>mhat / √vhat</code> 单独看：它是一句很聪明的话——
+    </p>
+    <p>
+      <strong>「用梯度的平均方向除以梯度的波动幅度。」</strong>
+    </p>
+    <p>
+      如果一个参数的梯度一直很大且稳定，说明它需要大步走；
+      如果梯度忽大忽小（噪声大），就缩小步长，别被噪声带偏。
+      所以 Adam 让<strong>每个参数有自己的自适应学习率</strong>，
+      这是它在稀疏梯度场景（比如嵌入层）特别有效的原因。
+    </p>
+    <p>
+      而 <code>+ self.wd * p.data</code> 这一项，是「解耦」的含义：
+      权重衰减<strong>不通过梯度</strong>，而是直接乘到参数上。
+      这样它就不会被 <code>mhat/√vhat</code> 的缩放影响——
+      这是 AdamW 和「把 L2 正则加进损失」的关键区别（见第 4 章）。
+    </p>
+  </div>
+
+  <h2>20.7 第五段：分词与数据</h2>
+
+  <p>
+    字符级分词器只有十几行，而且完全不需要任何外部依赖。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="字符级分词器 + 批次取样">
+<script type="text/dlcode">
+class CharTokenizer:
+    """最朴素的分词：每个字符是一个 token。
+
+    真实模型用 BPE（见第 11 章），但字符级足够让我们把
+    注意力、反向传播、采样这条链路完整走通，且不需要任何外部依赖。
+    """
+
+    def __init__(self, text):
+        chars = sorted(set(text))
+        self.stoi = {c: i for i, c in enumerate(chars)}
+        self.itos = {i: c for c, i in self.stoi.items()}
+        self.vocab_size = len(chars)
+
+    def encode(self, s):
+        return np.array([self.stoi[c] for c in s], dtype=np.int64)
+
+    def decode(self, ids):
+        return ''.join(self.itos[int(i)] for i in ids)
+
+
+def get_batch(data, block, batch_size, rng):
+    """随机取 batch_size 个长度为 block 的片段。
+
+    注意 y 是 x 向右移一位——这就是「预测下一个字」的全部实现。
+    一个序列同时提供了 block 个训练样本（每个位置都是一个样本），
+    这就是「自监督」的含义：标签来自数据本身，不需要人工标注。
+    """
+    ix = rng.integers(0, len(data) - block - 1, size=batch_size)
+    x = np.stack([data[i:i + block] for i in ix])
+    y = np.stack([data[i + 1:i + 1 + block] for i in ix])
+    return x, y
+</script>
+  </div>
+
+  <h2>20.8 第六段：训练循环</h2>
+
+  <p>
+    最后是把所有东西串起来。注意这里的顺序，
+    以及梯度裁剪的位置。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="训练循环">
+<script type="text/dlcode">
+max_iters, batch = 600, 16
+t0 = time.time()
+for it in range(max_iters + 1):
+    xb, yb = get_batch(train, model.block, batch, rng)
+
+    # ---- ① 前向：数据往上走，计算图自动建起来 ----
+    _, loss = model.forward(xb, yb)
+
+    # ---- ② 清零：上一轮的梯度必须扔掉 ----
+    opt.zero_grad()
+
+    # ---- ③ 反向：梯度沿同一条路走回来 ----
+    loss.backward()
+
+    # ---- ④ 梯度裁剪：防止偶发的梯度爆炸把参数打飞 ----
+    total = np.sqrt(sum((p.grad ** 2).sum() for p in model.parameters()))
+    if total > 1.0:
+        for p in model.parameters():
+            p.grad *= 1.0 / (total + 1e-6)
+
+    # ---- ⑤ 更新参数 ----
+    opt.step()
+
+    if it % 100 == 0:
+        print(f'  step {it:4d}  loss {loss.data:.4f}  '
+              f'val {evaluate():.4f}  {time.time() - t0:.1f}s')
+</script>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>顺序不能错</div>
+    <p>
+      <strong>zero_grad 必须在 backward 之前、forward 之后。</strong>
+    </p>
+    <p>
+      如果放在 forward 之前，看起来也能跑——
+      但如果你做「多个小批次累积梯度」这种操作（在显存不足时很常用），
+      顺序就会变得关键。养成固定的顺序，能省掉很多玄学 bug。
+    </p>
+    <p>
+      另外注意<strong>梯度裁剪在 opt.step() 之前</strong>。
+      它的作用是给梯度的整体范数设一个上限：
+      如果这一批数据恰好产生了异常大的梯度（长尾样本、数值不稳），
+      裁剪能把它压回合理范围，避免一步就把参数更新到崩溃。
+      <em>这是训练稳定性最便宜也最有效的一道保险。</em>
+    </p>
+  </div>
+
+  <h2>20.9 跑起来</h2>
+
+  <p>
+    把上面六段拼成一个文件（完整文件约 300 行，
+    已放在 <code>code/mini_gpt.py</code>），然后运行：
+  </p>
+
+  <div class="codeblock" data-lang="bash" data-title="训练 + 采样">
+<script type="text/dlcode">
+$ pip install numpy
+$ python mini_gpt.py                # 用内置语料
+$ python mini_gpt.py 我的语料.txt    # 或用你自己的文本
+
+语料 2574 字 · 词表 357 · train 2316 / val 258
+参数量 847.2K
+  step    0  loss 5.8959  val 5.7376  0.5s
+  step  100  loss 0.1863  val 0.2170  4.2s
+  step  200  loss 0.0975  val 0.0955  7.7s
+  step  300  loss 0.0534  val 0.0549  12.0s
+  step  400  loss 0.0526  val 0.0548  15.6s
+  step  500  loss 0.0505  val 0.0457  19.3s
+  step  600  loss 0.0401  val 0.0710  24.0s
+
+训练完成。采样三段看看效果：
+
+[temperature=0.5] 深度学习是机器学习的一个分支，它使用多层神经网络从数据中学习表示。
+                 神经网络由许多神经元组成，每个神经元接收输入，做加权求和，
+[temperature=0.8] 深度学习是机器学习的一个分支，它使用多层神经网络从数据中学习表示。
+                 神经网络由许多神经元组成，每个神经元接收输入，做加权求和，
+[temperature=1.0] 深度学习是机器学习的请求。人类反馈强化学习用偏好数据进一步打磨模型的输出风格。
+                 检索增强生成先从知识库找出相关段落，再让模型基于这些段落回答。
+</script>
+  </div>
+
+  <p>
+    三个数字值得停下来看：
+  </p>
+
+  <ol>
+    <li>
+      <strong>初始损失 5.90。</strong>
+      词表大小是 357，随机猜的话损失应该是
+      <code>−ln(1/357) ≈ 5.88</code>。
+      初始损失正好在这个数附近，说明<strong>初始化是正常的</strong>——
+      模型一开始完全没有偏好，所有字的概率均等。
+      <em>这是检查代码是否正确的第一个信号。</em>
+    </li>
+    <li>
+      <strong>验证损失同步下降。</strong>
+      从 5.74 降到 0.05，而且和训练损失贴得很近，
+      说明模型在泛化，不是在背题。
+    </li>
+    <li>
+      <strong>24 秒。</strong>
+      纯 NumPy、单核 CPU、85 万参数、600 步。
+      真模型要几千张 GPU 跑几个月——差距全在规模上，不在原理上。
+    </li>
+  </ol>
+
+  <div class="note note--lab">
+    <div class="note__title"><span class="ico">⚗</span>为什么它能把原句复述得这么准</div>
+    <p>
+      因为这个语料只有 2574 字、重复了 3 遍，而模型有 85 万参数。
+      <strong>参数远多于数据，它把训练集背下来了。</strong>
+    </p>
+    <p>
+      这不是 bug，而是小语料的必然结果。想看真正的泛化，
+      换一个几万到几十万字、内容多样的语料文件：
+    </p>
+    <p>
+      <code>python mini_gpt.py 红楼梦.txt</code><br>
+      <code>python mini_gpt.py 某个开源项目的所有源码.txt</code>
+    </p>
+    <p>
+      语料越大，损失下降得越慢，但生成的内容会越来越像那么回事——
+      这时候你观察到的就是<strong>真正的学习</strong>，
+      而不是记忆。这也是第 11 章讲的缩放定律在你自己的机器上重演一遍。
+    </p>
+  </div>
+
+  <h2>20.10 怎么知道它是对的：梯度检查</h2>
+
+  <p>
+    手写的反向传播有个特点：<strong>写错了不报错，只是训练不动。</strong>
+    所以你需要一个能自动发现错误的手段。
+  </p>
+
+  <p>
+    这个方法叫<strong>梯度检查（gradient check）</strong>，
+    思路朴素到极点：<strong>用数值方法算一遍梯度，和你手写的对比。</strong>
+  </p>
+
+  <div class="formula">
+    <div class="formula__body">
+      ∂L/∂θ ≈ [ L(θ + ε) − L(θ − ε) ] / 2ε
+    </div>
+    <div class="formula__cap">
+      中心差分。它的精度是 O(ε²)，比前向差分好得多。
+      这个式子是导数的定义，不需要任何数学技巧——
+      而你的反向传播代码给出的应该是同一个数。
+    </div>
+  </div>
+
+  <div class="codeblock" data-lang="python" data-title="梯度检查：把两个数字放在一起比">
+<script type="text/dlcode">
+def gradcheck(f, tensors, eps=1e-2):
+    """f(*tensors) 必须返回一个标量 Tensor。"""
+    out = f(*tensors)
+    out.backward()                       # ① 解析梯度（你手写的反向传播）
+
+    worst = 0.0
+    for t in tensors:
+        ana = t.grad.copy()
+        num = np.zeros_like(t.data)
+        it = np.nditer(t.data, flags=['multi_index'])
+        while not it.finished:           # ② 数值梯度（逐个参数扰动）
+            i = it.multi_index
+            old = t.data[i]
+            t.data[i] = old + eps; lp = f(*tensors).data
+            t.data[i] = old - eps; lm = f(*tensors).data
+            t.data[i] = old
+            num[i] = (lp - lm) / (2 * eps)
+            it.iternext()
+
+        denom = np.maximum(1e-6, np.abs(ana) + np.abs(num))
+        err = float(np.max(np.abs(ana - num) / denom))
+        worst = max(worst, err)
+        t.grad.fill(0)                   # 清零，为下一个算子做准备
+    return worst
+</script>
+  </div>
+
+  <p>
+    然后逐个算子跑一遍。这是我在写这份代码时实际得到的输出：
+  </p>
+
+  <div class="codeblock" data-lang="text" data-title="梯度检查结果（真实输出）">
+<script type="text/dlcode">
+  OK   add/mul/broadcast      max_rel_err=5.10e-06
+  OK   matmul(batched)        max_rel_err=2.02e-03
+  OK   matmul(bcast)          max_rel_err=1.28e-04
+  OK   transpose             max_rel_err=1.04e-05
+  OK   softmax                max_rel_err=8.08e-03
+  OK   layernorm              max_rel_err=1.73e-03
+  OK   gelu                   max_rel_err=1.63e-04
+  OK   embedding              max_rel_err=1.37e-05
+  OK   cross_entropy          max_rel_err=1.02e-04
+  OK   attn-composite         max_rel_err=2.79e-03
+</script>
+  </div>
+
+  <p>
+    全部算子的相对误差都在 1e-2 以下，说明手写的反向传播是对的。
+    最后还要做一次<strong>端到端检查</strong>：直接扰动模型里的一个真实参数，
+    看解析梯度和数值梯度是否一致。
+  </p>
+
+  <div class="codeblock" data-lang="text" data-title="端到端检查：扰动 wte 的一个元素">
+<script type="text/dlcode">
+    wte[0,0] 解析=+0.043201 数值=+0.043154 相对误差=5.51e-04
+    wte[1,3] 解析=-0.006997 数值=-0.006914 相对误差=5.93e-03
+    wte[2,7] 解析=+0.213657 数值=+0.213623 相对误差=7.98e-05
+</script>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>梯度检查的三个实操要点</div>
+    <p>
+      <strong>1. 用 float32 时，ε 不能太小。</strong>
+      很多人照搬教科书的 <code>ε=1e-7</code>，
+      结果在 float32 下完全对不上——因为
+      <code>L(θ+ε) − L(θ−ε)</code> 这两个数的差，
+      已经小于浮点数的精度了，相减得到的是噪声。
+      <em>float32 建议用 ε=1e-2 ~ 1e-3。</em>
+    </p>
+    <p>
+      <strong>2. 检查函数的输出要保持 O(1) 量级。</strong>
+      如果你的检查函数是「求和」而不是「求平均」，
+      输出可能有几百，那么相对误差会被人为放大。
+      上面我第一次跑的时候就是因为用了 <code>sum</code>，
+      <code>matmul</code> 和 <code>softmax</code> 两个算子的误差虚高到 0.07 和 0.19；
+      改成 <code>mean</code> 之后立刻降到 1e-3 量级。
+    </p>
+    <p>
+      <strong>3. 不要在有随机性的路径上做检查。</strong>
+      如果检查函数内部会生成新的随机数
+      （比如每次调用都重新 <code>rng.normal()</code>），
+      那么解析梯度和数值梯度算的根本不是同一个函数，
+      结果毫无意义。<em>这个坑我也踩了，浪费了一轮排查时间。</em>
+    </p>
+  </div>
+
+  <h2>20.11 训练不收敛？按这个顺序排查</h2>
+
+  <p>
+    自己实现模型，最常见的问题就是「损失不动」或「损失变成 NaN」。
+    按下面的顺序查，基本能定位到问题。
+  </p>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th style="width:22%">症状</th><th style="width:38%">最可能的原因</th><th>怎么验证 / 怎么修</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>损失完全不降，梯度范数 = 0</strong></td>
+        <td>计算图断了：某个算子没有把 <code>requires_grad</code> 传给输出，
+            或者反向传播没有按拓扑序</td>
+        <td>对任意一个参数做梯度检查。
+            <strong>梯度范数精确等于 0 是最典型的信号</strong></td>
+      </tr>
+      <tr>
+        <td><strong>初始损失远大于 ln(词表大小)</strong></td>
+        <td>初始化尺度过大，或 logits 数值溢出</td>
+        <td>打印第 0 步的损失。字符级模型应该在
+            <code>ln(V)</code> 附近（本例 5.88）</td>
+      </tr>
+      <tr>
+        <td><strong>损失变成 NaN</strong></td>
+        <td>① 学习率太大 ② <code>log(0)</code>
+            ③ <code>exp</code> 溢出 ④ 除以 0</td>
+        <td>先降学习率 10 倍。检查 softmax 有没有减最大值、
+            交叉熵有没有加 <code>1e-9</code>、
+            LayerNorm 有没有加 <code>eps</code></td>
+      </tr>
+      <tr>
+        <td><strong>损失下降后突然飙升</strong></td>
+        <td>梯度爆炸（长尾样本或数值不稳）</td>
+        <td>加梯度裁剪。本例用的是「全局范数 &gt; 1 就等比缩放」</td>
+      </tr>
+      <tr>
+        <td><strong>训练损失降，验证损失升</strong></td>
+        <td>过拟合</td>
+        <td>增加数据、减小模型、加权重衰减。
+            小语料上这是必然的，不是 bug</td>
+      </tr>
+      <tr>
+        <td><strong>损失降不下去，卡在一个值</strong></td>
+        <td>学习率太小，或者模型容量不够</td>
+        <td>先调大学习率试。字符级小模型上 3e-3 是合适的量级</td>
+      </tr>
+      <tr>
+        <td><strong>生成的内容全是重复</strong></td>
+        <td>温度太低，或训练不足</td>
+        <td>提高温度、用 Top-K 采样。
+            也可以加「重复惩罚」（见第 14 章）</td>
+      </tr>
+      <tr>
+        <td><strong>生成的内容语法全乱</strong></td>
+        <td>模型太小、训练不足，或者掩码写错了</td>
+        <td>先确认掩码：<strong>训练时 loss 正常下降就说明掩码是对的</strong>，
+            因为掩码错了损失根本降不下去</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">一条通用的调试心法</div>
+    <p>
+      <strong>先确认「能不能过拟合一个极小的数据集」。</strong>
+    </p>
+    <p>
+      拿 200 个字、2 层、训练 200 步，损失应该能降到接近 0。
+      如果连这个都做不到，说明代码有 bug，不要再去调超参数了。
+    </p>
+    <p>
+      这个「<em>小数据过拟合测试</em>」是所有深度学习调试的第一步，
+      也是最能节省时间的一步。它把「模型学不会」和「代码写错了」
+      这两类问题彻底分开——而这两类问题的解法完全不同。
+    </p>
+  </div>
+
+  <h2>20.12 动手改造：八个练习</h2>
+
+  <p>
+    读完代码不等于学会。下面八个练习按难度排列，
+    每一个都会让你对某个概念的理解更深一层。
+    建议至少做前四个。
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">① 改超参数（入门）</div>
+      <p class="card__body">
+        把 <code>n_layer</code> 从 4 改成 1、2、8，观察损失曲线。
+        再改 <code>n_embd</code>、<code>n_head</code>、学习率。
+        <strong>亲手感受一下「容量」和「收敛速度」的关系。</strong>
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">② 关掉权重共享</div>
+      <p class="card__body">
+        加一个独立的 <code>lm_head (C, V)</code>，不复用 <code>wte</code>。
+        参数变多了，效果更好还是更差？
+        在小语料上你可能会发现<strong>共享反而更好</strong>——想想为什么。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">③ 关掉残差连接</div>
+      <p class="card__body">
+        把 <code>x = x + ...</code> 改成 <code>x = ...</code>。
+        训练会明显变难。这就是第 7 章讲的残差连接的作用——
+        <strong>你现在可以亲手验证它了</strong>。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">④ 关掉 LayerNorm</div>
+      <p class="card__body">
+        把 <code>layernorm</code> 换成恒等映射。观察损失。
+        再把学习率调大 10 倍试试——
+        这就是第 6 章说的「归一化让你能用更大的学习率」。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">⑤ 换成 BPE 分词</div>
+      <p class="card__body">
+        实现一个最简单的 BPE：统计最高频的相邻字对，合并成新 token。
+        词表会变小、序列会变短、生成质量会提升。
+        <strong>这是第 11 章内容的动手版。</strong>
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">⑥ 加 dropout</div>
+      <p class="card__body">
+        在注意力权重和 MLP 之后加 dropout。
+        在一个较大的语料上，验证损失会有明显改善。
+        注意：<strong>推理时必须关掉</strong>。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">⑦ 换一个优化器</div>
+      <p class="card__body">
+        实现一个纯 SGD（带动量），和第 4 章的 AdamW 对比收敛速度。
+        你会直观看到自适应学习率的价值。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">⑧ 加一个 KV Cache</div>
+      <p class="card__body">
+        现在的 <code>generate</code> 每生成一个字都要重新算整个序列。
+        缓存已经算过的 K 和 V，速度会快好几倍。
+        <strong>这是第 14 章内容的动手版。</strong>
+      </p>
+    </div>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>做练习的正确方式</div>
+    <p>
+      每改一处，<strong>先预测结果，再运行验证</strong>。
+    </p>
+    <p>
+      比如做练习 ③ 之前，先写下你的预测：
+      「去掉残差后，梯度传不过去，损失应该几乎不降」。
+      然后再跑。如果你的预测错了，那正是最有价值的时刻——
+      <em>去搞清楚为什么。</em>
+    </p>
+    <p>
+      这个「预测 → 验证 → 解释差异」的循环，
+      比读十篇教程都有效。因为它在强迫你建立
+      <strong>可被证伪的直觉</strong>，而不是模糊的「大概是这样」。
+    </p>
+  </div>
+
+  <h2>20.13 本章小结</h2>
+
+  <ol>
+    <li>
+      <strong>自动微分的全部秘密：每个算子只需要知道局部导数。</strong>
+      计算图负责记录依赖，链式法则负责串起来，
+      拓扑序保证梯度完整。
+    </li>
+    <li>
+      <strong>三个基础算子（加、乘、矩阵乘）加五个融合算子，
+      就足够搭出整个 GPT。</strong>
+      没有更复杂的东西了。
+    </li>
+    <li>
+      <strong>requires_grad 必须逐层传播。</strong>
+      忘了传，训练会静默失败——不报错，梯度精确等于 0。
+    </li>
+    <li>
+      <strong>梯度是累加的，所以每轮必须清零。</strong>
+      这也是为什么 <code>zero_grad → backward → step</code>
+      的顺序不能乱。
+    </li>
+    <li>
+      <strong>交叉熵的梯度是 softmax − onehot。</strong>
+      模型错得越离谱，梯度越大。这个性质是它成为默认损失的原因。
+    </li>
+    <li>
+      <strong>梯度检查是手写反向传播的唯一可靠验证手段。</strong>
+      float32 下 ε 取 1e-2 左右，检查函数输出保持 O(1)。
+    </li>
+    <li>
+      <strong>初始损失应该接近 ln(词表大小)。</strong>
+      这是检查代码是否正确的第一个信号。
+    </li>
+    <li>
+      <strong>调试第一步永远是「过拟合一个极小的数据集」。</strong>
+      它把「模型学不会」和「代码写错了」这两类问题分开。
+    </li>
+    <li>
+      <strong>规模化只是把同一件事做得更大。</strong>
+      真模型和这 300 行的区别，
+      在于层数、维度、数据量、并行方式和工程优化——
+      <em>不在于原理。</em>
+    </li>
+  </ol>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">自动微分 <small>autodiff</small></div>
+      <div class="gloss__def">由程序自动计算导数。反向模式（即反向传播）适合「输入多、输出少」的场景。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">计算图</div>
+      <div class="gloss__def">记录每个张量由哪些张量、经过什么运算得到。反向传播沿它逆向行走。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">拓扑序</div>
+      <div class="gloss__def">保证每个节点在被访问前，所有依赖它的节点都已处理完的顺序。反向传播必须按此顺序。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">梯度检查</div>
+      <div class="gloss__def">用数值差分验证解析梯度。手写反向传播后必须做的一步。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">权重共享 <small>weight tying</small></div>
+      <div class="gloss__def">输入嵌入和输出投影用同一组参数。省一半参数，且通常效果不降。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">梯度裁剪</div>
+      <div class="gloss__def">给梯度范数设上限，超出时等比缩放。防止偶发的大梯度破坏训练。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">字符级分词</div>
+      <div class="gloss__def">每个字符是一个 token。词表小、序列长、无需训练分词器，适合教学和实验。</div>
+    </div>
+  </div>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么反向传播必须按拓扑序进行？顺序错了会怎样？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为<strong>一个节点可能被多个下游节点使用</strong>。
+        </p>
+        <p>
+          最典型的例子是残差连接：
+          <code>x</code> 既进了 LayerNorm，又直接加到了子层输出上。
+          所以 <code>x</code> 的梯度来自<strong>两条路径</strong>，
+          必须等两条路径都把梯度累加完，才能继续往前传。
+        </p>
+        <p>
+          拓扑序保证了「一个节点的所有下游都处理完了，才轮到它」。
+          这靠的是在后向遍历前先做一次深度优先后序遍历，
+          得到一个「父节点永远排在子节点之后」的线性顺序。
+        </p>
+        <p>
+          <strong>顺序错了会怎样？</strong>
+          不会报错，只是<strong>梯度不完整</strong>——
+          某个节点可能只用到了一部分梯度就往前传了。
+          后果是训练变慢、收敛到更差的解，甚至完全不收敛。
+        </p>
+        <p>
+          这正是自动微分系统里最麻烦的一类 bug：
+          <em>它不会崩溃，只会让你觉得「这个模型怎么这么难训」。</em>
+          这也是为什么梯度检查如此重要——
+          它能可靠地抓住这类静默错误。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么初始损失应该接近 ln(词表大小)？如果不是，说明什么？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为<strong>一个刚初始化的模型不应该有任何偏好</strong>。
+        </p>
+        <p>
+          如果模型对每个字的输出概率都是均匀的 <code>1/V</code>，
+          那么交叉熵就是：
+        </p>
+        <p>
+          <code>L = −ln(1/V) = ln(V)</code>
+        </p>
+        <p>
+          本例词表 357，<code>ln(357) ≈ 5.88</code>，
+          而实测初始损失是 5.90——几乎完美吻合。
+          这说明初始化是正常的，模型一开始确实「什么都不知道」。
+        </p>
+        <p>
+          <strong>如果不是这个数，说明有问题：</strong>
+        </p>
+        <p>
+          <strong>明显偏高</strong>（比如 8 以上）：
+          初始化尺度过大，logits 数值太极端，
+          softmax 后一个位置几乎吃掉全部概率，
+          导致损失虚高。或者 logits 已经溢出。
+        </p>
+        <p>
+          <strong>明显偏低</strong>（比如 2 以下）：
+          通常意味着<strong>标签泄漏</strong>——
+          模型不小心看到了答案。常见原因是
+          <code>y</code> 的错位写错了（应该是 <code>x</code> 右移一位，
+          如果写成了和 <code>x</code> 相同，那就是在让模型「抄自己」）。
+        </p>
+        <p>
+          所以：<strong>打印第 0 步的损失，是检查代码正确性最便宜的一招。</strong>
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>手写反向传播时，最容易犯哪三类 bug？怎么发现？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>① requires_grad 没有传播。</strong>
+          算子创建输出张量时忘了传 <code>requires_grad</code>，
+          于是中间张量的 <code>requires_grad</code> 是 False，
+          所有 <code>if self.requires_grad</code> 判断都跳过。
+        </p>
+        <p>
+          <strong>症状：</strong>训练不报错，损失完全不动，
+          <strong>梯度范数精确等于 0.0</strong>。
+        </p>
+        <p>
+          <strong>② 广播没有反演。</strong>
+          前向时把一个 <code>(C,)</code> 的偏置加到 <code>(B*T, C)</code> 上，
+          反向时忘了把梯度<strong>求和</strong>回 <code>(C,)</code> 的形状。
+        </p>
+        <p>
+          <strong>症状：</strong>形状不匹配会直接报错（这是好事）；
+          但如果形状恰好蒙对（比如两个维度相同），
+          就会静默地传错梯度。
+        </p>
+        <p>
+          <strong>③ 忘记累加（用了 = 而不是 +=）。</strong>
+          当一个张量被多处使用时，梯度必须累加。
+          如果写成了覆盖，就只保留了一条路径的梯度。
+        </p>
+        <p>
+          <strong>症状：</strong>梯度偏小、训练变慢，不报错。
+        </p>
+        <p>
+          <strong>怎么发现？</strong>唯一的可靠手段就是
+          <strong>梯度检查</strong>：对每个算子单独做数值差分对比。
+          三类 bug 全部会被它抓住。
+        </p>
+        <p>
+          另外还有两个实操要点：
+          float32 下 ε 要用 1e-2 而不是 1e-7；
+          检查函数内部不能有随机性（否则解析和数值算的不是同一个函数）。
+          <em>这两个坑我都踩过。</em>
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>这个 300 行的实现，和真正的大模型差在哪里？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>原理上没有任何差别。</strong>差的全是规模、数据和工程。
+        </p>
+        <p>
+          <strong>① 规模。</strong>
+          这里是 4 层、128 维、85 万参数。
+          真模型是上百层、上万维、几千亿参数。
+          但每一个块做的事情完全一样。
+        </p>
+        <p>
+          <strong>② 数据。</strong>
+          这里是 2574 个字符。真模型是几万亿 token。
+          这是最本质的差距——<em>能力主要来自数据，而不是来自代码</em>。
+        </p>
+        <p>
+          <strong>③ 并行与效率。</strong>
+          这里是单核 NumPy 循环。
+          真模型要做数据并行、张量并行、流水并行、专家并行，
+          还要用混合精度、FlashAttention、ZeRO 分片显存。
+          这些是第 12 章的内容，纯粹是工程。
+        </p>
+        <p>
+          <strong>④ 后训练。</strong>
+          这里只做了预训练目标（预测下一个字）。
+          真模型还要做指令微调、RLHF/DPO 对齐（第 13 章）。
+        </p>
+        <p>
+          <strong>⑤ 分词。</strong>
+          这里是字符级，词表 357。
+          真模型用 BPE，词表 10 万以上，压缩率高出好几倍。
+        </p>
+        <p>
+          <strong>⑥ 推理优化。</strong>
+          这里每生成一个字都重算整个序列。
+          真模型有 KV Cache、PagedAttention、连续批处理（第 14 章）。
+        </p>
+        <p>
+          所以结论是：
+          <strong>你已经理解了 100% 的原理，剩下的是把同一件事放大一万倍。</strong>
+          这句话不是安慰——它意味着当你读一篇新的架构论文时，
+          你有能力判断「它改的是哪一部分、为什么改、代价是什么」。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>如果训练不收敛，你会按什么顺序排查？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>第一步：过拟合一个极小的数据集。</strong>
+        </p>
+        <p>
+          拿 200 个字、2 层、训练 200 步。
+          损失应该能降到接近 0。
+          <strong>如果连这个都做不到，就是代码有 bug</strong>，
+          不要再调超参数了。
+          这一步把「模型学不会」和「代码写错了」彻底分开——
+          而这两类问题的解法完全不同。
+        </p>
+        <p>
+          <strong>第二步：看初始损失。</strong>
+          应该接近 <code>ln(词表大小)</code>。
+          偏离太多说明初始化或标签错位有问题。
+        </p>
+        <p>
+          <strong>第三步：看梯度范数。</strong>
+          精确等于 0 → 计算图断了（requires_grad 没传播）。
+          突然变得极大 → 需要梯度裁剪。
+        </p>
+        <p>
+          <strong>第四步：对可疑算子做梯度检查。</strong>
+          数值差分和解析梯度对比，这是唯一能抓住静默 bug 的手段。
+        </p>
+        <p>
+          <strong>第五步：才轮到超参数。</strong>
+          学习率降 10 倍试试。字符级小模型上 3e-3 是合适量级。
+        </p>
+        <p>
+          注意这个顺序：<strong>先验证正确性，再调参数。</strong>
+          很多人在有 bug 的代码上反复调学习率，
+          最后得出「这个架构不行」的错误结论。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    你已经能亲手训练一个能生成文本的 GPT 了。这本书剩下的最后一章，
+    讲的是<strong>再往前看</strong>：
+  </p>
+
+  <p>
+    混合专家怎么把参数和计算解耦、长上下文为什么「窗口变长不等于记忆变好」、
+    「让模型想得更久」为什么会成为第三条缩放曲线、
+    多模态怎么把图像变成 token，
+    以及——<strong>哪些问题到今天仍然没有解决</strong>。
+  </p>
+
+  <p>
+    最后一节我会给出一份诚实的清单：
+    幻觉、可解释性、持续学习、长程可靠性、评测可信度……
+    理解这些边界，比记住任何结论都重要。
+    <em>因为所有的系统设计，本质上都是在为这些已知的缺陷做补偿。</em>
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

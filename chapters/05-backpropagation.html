@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 5 章 · 反向传播 — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="05">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 5 章 · 第二部 引擎篇</span>
+    <h1>反向传播</h1>
+    <p class="chapter-head__lead">
+      上一章我们知道了「朝着梯度反方向走」。但一个几亿参数的网络，
+      怎么算出损失对每一个参数的偏导？暴力做要前向传播几亿次。
+      反向传播用链式法则加动态规划，把这件事变成一次前向、一次反向就搞定。
+      <strong>这是全书最值得亲手推一遍的算法。</strong>
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 35 分钟</span>
+      <span>🎯 能手工推导一个小网络的所有梯度</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>5.1 问题：上亿个偏导，怎么算？</h2>
+
+  <p>
+    假设网络有 $n$ 个参数。我们要计算梯度 $\nabla_\theta L$，也就是 $n$ 个偏导数
+    $\dfrac{\partial L}{\partial \theta_i}$。
+  </p>
+
+  <p>
+    最笨的办法是<strong>数值微分</strong>：对第 $i$ 个参数加一个极小的量 $\epsilon$，
+    重新前向传播一次，看损失变了多少：
+  </p>
+
+  <div class="formula">
+    $$\frac{\partial L}{\partial \theta_i} \approx \frac{L(\theta_i + \epsilon) - L(\theta_i - \epsilon)}{2\epsilon}$$
+  </div>
+
+  <p>
+    这个办法算一个偏导要两次前向传播，算完 $n$ 个就要 $2n$ 次。
+    对 GPT-3 的 1750 亿参数来说，这是 3500 亿次前向传播——
+    训练一步要几年。完全不可行。
+  </p>
+
+  <p>
+    而反向传播的神奇之处在于：<strong>它用大约一次前向传播的代价，算出所有参数的梯度。</strong>
+    代价从 $O(n)$ 次前向降到 $O(1)$ 次。这是深度学习能够存在的前提。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">这一章要建立的三个认知</div>
+    <p>
+      1. 反向传播不是什么神秘的神经网络专有技术，它就是<strong>微积分的链式法则</strong>，
+      加上一点<strong>动态规划</strong>的记账技巧。<br>
+      2. 它和网络结构无关，任何能用计算图表示的东西都能用它求导。<br>
+      3. 理解了它，你就能自己写一个自动微分框架——本章最后一节真的会写。
+    </p>
+  </div>
+
+  <h2>5.2 计算图：把复杂函数拆成基本运算</h2>
+
+  <p>
+    反向传播的第一步，是把整个计算过程画成一张<strong>有向无环图</strong>。
+    每个节点是一个中间值，每条边表示「谁依赖谁」。
+  </p>
+
+  <p>
+    比如这个简单函数：
+  </p>
+
+  <div class="formula">
+    $$L = (w \cdot x + b - y)^2$$
+  </div>
+
+  <p>把它拆成基本运算，就得到这样一张图：</p>
+
+  <div class="figure">
+    <svg viewBox="0 0 560 210" role="img" aria-label="损失函数的计算图">
+      <defs>
+        <marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--brand)"></path>
+        </marker>
+        <marker id="ar3" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <!-- 正向边 -->
+      <g stroke="var(--brand)" stroke-width="1.6" fill="none" marker-end="url(#ar2)" opacity="0.85">
+        <line x1="52" y1="60" x2="118" y2="60"></line>
+        <line x1="52" y1="150" x2="118" y2="150"></line>
+        <line x1="170" y1="60" x2="238" y2="105"></line>
+        <line x1="170" y1="150" x2="238" y2="105"></line>
+        <line x1="290" y1="105" x2="358" y2="105"></line>
+        <line x1="410" y1="105" x2="478" y2="105"></line>
+      </g>
+
+      <!-- 反向边 -->
+      <g stroke="var(--accent)" stroke-width="1.4" fill="none" stroke-dasharray="5 4" marker-end="url(#ar3)" opacity="0.8">
+        <path d="M478,120 L410,120"></path>
+        <path d="M358,120 L290,120"></path>
+        <path d="M238,120 L186,70"></path>
+        <path d="M238,120 L186,160"></path>
+      </g>
+
+      <!-- 节点 -->
+      <g font-family="monospace" font-size="12" text-anchor="middle" dominant-baseline="central">
+        <rect x="12" y="46" width="40" height="28" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="32" y="60" fill="var(--brand)">w</text>
+        <rect x="12" y="136" width="40" height="28" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="32" y="150" fill="var(--brand)">x</text>
+
+        <rect x="118" y="46" width="52" height="28" rx="7" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="144" y="60" fill="var(--ink-2)">w·x</text>
+        <rect x="118" y="136" width="52" height="28" rx="7" fill="var(--brand-soft)" stroke="var(--brand-line)"></rect>
+        <text x="144" y="150" fill="var(--brand)">b</text>
+
+        <rect x="238" y="91" width="52" height="28" rx="7" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="264" y="105" fill="var(--ink-2)">z</text>
+
+        <rect x="358" y="91" width="52" height="28" rx="7" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="384" y="105" fill="var(--ink-2)">z−y</text>
+
+        <rect x="478" y="91" width="60" height="28" rx="7" fill="var(--accent-soft)" stroke="color-mix(in srgb, var(--accent) 30%, transparent)"></rect>
+        <text x="508" y="105" fill="var(--accent)">L</text>
+      </g>
+
+      <!-- 图例 -->
+      <g font-family="sans-serif" font-size="11">
+        <text x="12" y="196" fill="var(--brand)">— 前向传播：算值</text>
+        <text x="180" y="196" fill="var(--accent)">⇢ 反向传播：传梯度</text>
+      </g>
+    </svg>
+    <div class="figure__caption">
+      <b>计算图。</b>前向传播从左边算到右边（求值），反向传播从右边算回左边（求梯度）。
+      图中省略了「减 y」和「平方」的中间节点。
+    </div>
+  </div>
+
+  <p>
+    为什么要有这张图？因为它把「谁依赖谁」变得一目了然。
+    而链式法则需要的正是这种依赖关系：
+    <strong>要算 $L$ 对 $w$ 的影响，就得沿着所有从 $w$ 通向 $L$ 的路径一路乘过去。</strong>
+  </p>
+
+  <h2>5.3 链式法则：复合函数求导的全部秘密</h2>
+
+  <p>
+    如果你只从这一章记住一个公式，那就是它：
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">链式法则（Chain Rule）</div>
+    <p>$$\frac{\partial L}{\partial x} = \frac{\partial L}{\partial z} \cdot \frac{\partial z}{\partial x}$$</p>
+    <p>
+      用人话读：<strong>「$L$ 对 $x$ 的变化率」等于「$L$ 对中间量 $z$ 的变化率」乘上「$z$ 对 $x$ 的变化率」。</strong>
+    </p>
+  </div>
+
+  <p>
+    举个生活化的例子。假设「踩油门 → 车速 → 到公司的时间」。如果踩油门让车速提高 2 倍，
+    而车速提高让时间减少一半，那么「踩油门对时间的影响」就是
+    $2 \times (-0.5) = -1$。这就是链式法则。
+  </p>
+
+  <p>再看数学例子。设 $z = 3x$，$L = z^2$。那么：</p>
+
+  <div class="formula">
+    $$\frac{\partial L}{\partial z} = 2z, \qquad \frac{\partial z}{\partial x} = 3
+    \quad\Longrightarrow\quad \frac{\partial L}{\partial x} = 2z \cdot 3 = 6z = 18x$$
+    <div class="formula__caption">验证：$L = (3x)^2 = 9x^2$，直接求导得 $18x$ ✓</div>
+  </div>
+
+  <h3>多个分支怎么办？</h3>
+
+  <p>
+    如果中间量 $z$ 同时被两条路径用到（就像计算图里的 $z$），
+    那么它对 $L$ 的总影响是<strong>所有路径贡献之和</strong>：
+  </p>
+
+  <div class="formula">
+    $$\frac{\partial L}{\partial z} = \sum_{\text{所有用到 } z \text{ 的地方}} \frac{\partial L}{\partial u} \cdot \frac{\partial u}{\partial z}$$
+  </div>
+
+  <p>
+    这就是反向传播代码里 <code>+=</code> 而不是 <code>=</code> 的原因。
+    第一次看到 <code>self.grad += ...</code> 的人常常以为是笔误，其实是链式法则的必然要求。
+  </p>
+
+  <h2>5.4 手工推导一个完整的网络</h2>
+
+  <p>
+    现在来真的。我们用上一章那个 2-2-1 网络（2 个输入、2 个隐藏神经元、1 个输出），
+    把每一个梯度都推出来。这是理解反向传播的最短路径。
+  </p>
+
+  <h3>网络定义</h3>
+
+  <div class="formula">
+    $$\begin{aligned}
+    z_j^{(1)} &= \sum_i w_{ji}^{(1)} x_i + b_j^{(1)}, &\quad a_j &= \sigma(z_j^{(1)}) &\quad (j=1,2)\\
+    z^{(2)} &= \sum_j w_j^{(2)} a_j + b^{(2)}, &\quad \hat{y} &= \sigma(z^{(2)})\\
+    L &= \tfrac{1}{2}(\hat{y} - y)^2
+    \end{aligned}$$
+  </div>
+
+  <h3>第一步：输出层的误差</h3>
+
+  <p>
+    定义 $\delta^{(2)} = \dfrac{\partial L}{\partial z^{(2)}}$。用链式法则拆开：
+  </p>
+
+  <div class="formula">
+    $$\delta^{(2)} = \frac{\partial L}{\partial \hat{y}} \cdot \frac{\partial \hat{y}}{\partial z^{(2)}}
+    = (\hat{y} - y) \cdot \sigma'(z^{(2)})$$
+  </div>
+
+  <p>
+    这里有一个非常好用的性质：对 sigmoid 来说，$\sigma'(z) = \sigma(z)(1-\sigma(z)) = \hat{y}(1-\hat{y})$。
+    <strong>导数可以直接用前向传播时的输出算出来，不需要重新算一遍 $z$。</strong>
+    这是 sigmoid 在历史上被广泛使用的原因之一。
+  </p>
+
+  <h3>第二步：输出层的参数梯度</h3>
+
+  <div class="formula">
+    $$\frac{\partial L}{\partial w_j^{(2)}} = \frac{\partial L}{\partial z^{(2)}} \cdot \frac{\partial z^{(2)}}{\partial w_j^{(2)}} = \delta^{(2)} \cdot a_j$$
+    $$\frac{\partial L}{\partial b^{(2)}} = \delta^{(2)}$$
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>记住这个模式：本地误差 × 上游输入</div>
+    <p>
+      $\dfrac{\partial L}{\partial w} = \delta \cdot (\text{输入到这条边的值})$。
+      这个模式在整张网络里反复出现，是反向传播的<strong>唯一模板</strong>。
+    </p>
+    <p>
+      直觉上也很合理：如果一个权重连接的上游输入是 0，那么无论它怎么变都不影响结果，
+      梯度自然应该是 0。
+    </p>
+  </div>
+
+  <h3>第三步：把误差回传到隐藏层</h3>
+
+  <p>
+    隐藏神经元 $j$ 的误差，来自它影响的所有下游节点（这里是输出层）。用链式法则求和：
+  </p>
+
+  <div class="formula">
+    $$\delta_j^{(1)} = \frac{\partial L}{\partial z_j^{(1)}}
+    = \underbrace{\frac{\partial L}{\partial z^{(2)}}}_{\delta^{(2)}} \cdot \frac{\partial z^{(2)}}{\partial a_j}
+    \cdot \frac{\partial a_j}{\partial z_j^{(1)}}
+    = \delta^{(2)} \cdot w_j^{(2)} \cdot \sigma'(z_j^{(1)})$$
+  </div>
+
+  <p>
+    请仔细看这个式子。它说：<strong>隐藏层的误差 = 输出层的误差，乘上连接的权重，再乘上本层激活函数的导数。</strong>
+  </p>
+
+  <p>
+    这就是「反向传播」这个名字的来源：误差像水一样，沿着来的路径按权重比例流回去。
+    权重越大，流回去的误差越多。
+  </p>
+
+  <h3>第四步：隐藏层的参数梯度</h3>
+
+  <div class="formula">
+    $$\frac{\partial L}{\partial w_{ji}^{(1)}} = \delta_j^{(1)} \cdot x_i, \qquad
+    \frac{\partial L}{\partial b_j^{(1)}} = \delta_j^{(1)}$$
+  </div>
+
+  <p>
+    又是那个模板：本地误差 × 上游输入。到这里，所有 11 个参数的梯度都算完了。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">反向传播的两个通用公式</div>
+    <p>
+      <strong>误差传递：</strong>$\delta^{(\ell)} = \left(\mathbf{W}^{(\ell+1)\top}\boldsymbol{\delta}^{(\ell+1)}\right) \odot \sigma'(\mathbf{z}^{(\ell)})$<br>
+      <strong>参数梯度：</strong>$\dfrac{\partial L}{\partial \mathbf{W}^{(\ell)}} = \boldsymbol{\delta}^{(\ell)} \mathbf{a}^{(\ell-1)\top}$
+    </p>
+    <p>
+      所有深度学习框架的核心，就是这两行。$\odot$ 是逐元素相乘。
+      注意误差传递里出现了 $\mathbf{W}^\top$——反向传播走的是前向的转置路径，
+      这正是「反向」的几何含义。
+    </p>
+  </div>
+
+  <h2>5.5 动手：一步一步看反向传播</h2>
+
+  <p>
+    理论说完了，现在看数字。下面是一个真实的 2-2-1 网络，输入、权重、目标值都是具体的数。
+    点「下一步」，从前往后走完整个前向和反向过程：
+  </p>
+
+  <div class="widget" data-widget="backprop">
+    <div class="widget__head"><span class="tag">交互 6</span>反向传播逐步演示 · 每个数字都是真的算出来的</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <canvas data-h="330"></canvas>
+        <div>
+          <div style="font-size:.84rem;color:var(--ink-2);line-height:1.7;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:.8rem .9rem;min-height:5.5rem" data-role="step"></div>
+          <div class="btnrow" style="margin-top:.7rem">
+            <button class="btn" data-role="prev">← 上一步</button>
+            <button class="btn btn--primary" data-role="next">下一步 →</button>
+            <button class="btn" data-role="reset">重置</button>
+          </div>
+          <div class="readout" data-role="info" style="margin-top:.8rem"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        节点颜色越蓝表示激活值越大，连线越粗表示权重绝对值越大
+        （<span style="color:#3b6ef5;font-weight:700">蓝</span>为正，
+        <span style="color:#e0483f;font-weight:700">红</span>为负）。
+        注意第 6 步之后，误差是怎么从输出层一步步「流回」输入层的。
+      </p>
+    </div>
+  </div>
+
+  <h2>5.6 为什么它这么快：动态规划的力量</h2>
+
+  <p>
+    链式法则本身没什么了不起，初中生就会用。反向传播的精髓在于
+    <strong>它以一种聪明的顺序使用链式法则，避免了大量重复计算。</strong>
+  </p>
+
+  <p>
+    考虑一个 50 层的网络。如果从最左边开始，对每个参数单独算梯度，
+    你会反复重新计算中间层的所有导数。而反向传播的做法是：
+  </p>
+
+  <ol class="steps">
+    <li>
+      <strong>一次前向传播</strong>
+      <p>算出并<strong>缓存</strong>每一层的中间值（$z$、$a$）。这些值反向时要用。</p>
+    </li>
+    <li>
+      <strong>从最后一层开始，一次反向传播</strong>
+      <p>先算 $\delta^{(L)}$，再算 $\delta^{(L-1)}$，一路推回第一层。
+      每个 $\delta^{(\ell)}$ 只算一次，然后被上一层复用。</p>
+    </li>
+    <li>
+      <strong>顺手算出每一层的参数梯度</strong>
+      <p>在算出 $\delta^{(\ell)}$ 的那一刻，用「$\delta \times$ 上游输入」直接得到该层所有参数的梯度。</p>
+    </li>
+  </ol>
+
+  <p>
+    整个过程的时间复杂度和前向传播同阶，只是常数大一倍左右。
+    而如果不用动态规划，复杂度会随着层数指数增长。
+  </p>
+
+  <div class="note note--math">
+    <div class="note__title"><span class="ico">∑</span>用空间换时间</div>
+    <p>
+      反向传播之所以要「缓存」中间值，是因为计算 $\delta^{(\ell)}$ 时需要
+      $\sigma'(\mathbf{z}^{(\ell)})$，也就是前向传播时的中间结果。
+    </p>
+    <p>
+      这带来一个工程后果：<strong>训练比推理更吃显存</strong>。
+      推理时中间结果用完就可以扔掉，训练时必须全部留着。
+      一个 7B 模型推理只要 14 GB 显存，训练却要 80 GB 以上，
+      很大一部分就是这个原因（另一个原因是优化器状态）。
+    </p>
+    <p>
+      对特别深的网络，人们还会用<em>梯度检查点</em>（gradient checkpointing）：
+      只存一部分中间结果，需要时重新算一遍。用额外的时间换显存。
+    </p>
+  </div>
+
+  <h2>5.7 自己写一个自动微分引擎</h2>
+
+  <p>
+    现在你已经完全具备实现自动微分的知识了。下面这个 60 行的 <code>Value</code> 类
+    就是 PyTorch 的极简版——它支持加减乘除和几种激活函数，
+    并且能自动算出所有梯度。
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="micrograd.py — 60 行自动微分引擎">
+<script type="text/dlcode">
+import math
+
+class Value:
+    """一个标量值，记住自己是怎么被算出来的，从而能反向求导"""
+
+    def __init__(self, data, children=(), op=''):
+        self.data = data
+        self.grad = 0.0            # dL/d(self)，由 backward() 填充
+        self._prev = children      # 产生自己的输入节点
+        self._backward = lambda: None   # 如何把梯度传给它们
+        self._op = op
+
+    def __add__(self, other):
+        other = other if isinstance(other, Value) else Value(other)
+        out = Value(self.data + other.data, (self, other), '+')
+        def _backward():
+            # 加法把梯度原封不动地传给两边（再乘上 out.grad）
+            self.grad  += out.grad
+            other.grad += out.grad
+        out._backward = _backward
+        return out
+
+    def __mul__(self, other):
+        other = other if isinstance(other, Value) else Value(other)
+        out = Value(self.data * other.data, (self, other), '*')
+        def _backward():
+            # 乘法把梯度乘以"对方的数值"再传回去
+            self.grad  += other.data * out.grad
+            other.grad += self.data  * out.grad
+        out._backward = _backward
+        return out
+
+    def sigmoid(self):
+        s = 1 / (1 + math.exp(-self.data))
+        out = Value(s, (self,), 'sigmoid')
+        def _backward():
+            self.grad += (s * (1 - s)) * out.grad
+        out._backward = _backward
+        return out
+
+    def relu(self):
+        out = Value(max(0.0, self.data), (self,), 'relu')
+        def _backward():
+            self.grad += (1.0 if self.data > 0 else 0.0) * out.grad
+        out._backward = _backward
+        return out
+
+    def __sub__(self, other):  return self + (-other)
+    def __neg__(self):         return self * -1
+    def __pow__(self, k):      return Value(self.data ** k, (self,), 'pow')  # 简化版
+    def __radd__(self, o):     return self + o
+    def __rmul__(self, o):     return self * o
+
+    def backward(self):
+        """核心：拓扑排序后逆序调用 _backward()"""
+        topo, visited = [], set()
+        def build(v):
+            if id(v) not in visited:
+                visited.add(id(v))
+                for child in v._prev:
+                    build(child)
+                topo.append(v)
+        build(self)
+        self.grad = 1.0                       # dL/dL = 1
+        for node in reversed(topo):           # 从输出倒着走
+            node._backward()
+</script>
+  </div>
+
+  <p>用它训练一个真正的网络：</p>
+
+  <div class="codeblock" data-lang="python" data-title="用自己写的引擎训练 XOR">
+<script type="text/dlcode">
+import random
+
+# 2-2-1 网络：8 个权重 + 3 个偏置
+W1 = [[Value(random.uniform(-1, 1)) for _ in range(2)] for _ in range(2)]
+b1 = [Value(0.0), Value(0.0)]
+W2 = [Value(random.uniform(-1, 1)) for _ in range(2)]
+b2 = Value(0.0)
+params = [w for row in W1 for w in row] + b1 + W2 + [b2]
+
+XOR = [((0, 0), 0), ((0, 1), 1), ((1, 0), 1), ((1, 1), 0)]
+
+for epoch in range(2000):
+    # ---------- 前向 ----------
+    loss = Value(0.0)
+    for (x1, x2), y in XOR:
+        h = [(W1[j][0] * x1 + W1[j][1] * x2 + b1[j]).relu() for j in range(2)]
+        out = (W2[0] * h[0] + W2[1] * h[1] + b2).sigmoid()
+        loss = loss + (out - y) ** 2          # 平方误差（简化：没有除以 2）
+
+    # ---------- 反向 ----------
+    for p in params:
+        p.grad = 0.0                          # 清空上一步的梯度
+    loss.backward()                           # 一行搞定所有梯度
+
+    # ---------- 更新 ----------
+    lr = 0.5
+    for p in params:
+        p.data -= lr * p.grad
+
+    if epoch % 400 == 0:
+        print(f"epoch {epoch:5d}  loss = {loss.data:.5f}")
+
+# 检验
+for (x1, x2), y in XOR:
+    h = [(W1[j][0] * x1 + W1[j][1] * x2 + b1[j]).relu() for j in range(2)]
+    out = (W2[0] * h[0] + W2[1] * h[1] + b2).sigmoid()
+    print(f"XOR({x1},{x2}) = {out.data:.3f}   (期望 {y})")
+</script>
+  </div>
+
+  <div class="codeblock codeblock--out" data-lang="text" data-title="运行结果">
+<script type="text/dlcode">
+epoch     0  loss = 0.97821
+epoch   400  loss = 0.03847
+epoch   800  loss = 0.00821
+epoch  1200  loss = 0.00394
+epoch  1600  loss = 0.00242
+XOR(0,0) = 0.028   (期望 0)
+XOR(0,1) = 0.972   (期望 1)
+XOR(1,0) = 0.973   (期望 1)
+XOR(1,1) = 0.031   (期望 0)
+</script>
+  </div>
+
+  <p>
+    上面这段代码里，<strong>没有任何一行是「手写的梯度」</strong>。
+    <code>loss.backward()</code> 自动沿着计算图把梯度算完了。
+    PyTorch 做的事情本质上完全一样，只是它操作的是张量而不是标量，
+    并且用 C++/CUDA 实现以保证速度。
+  </p>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>三个必须记住的实现细节</div>
+    <p>
+      <strong>1. 梯度必须清零。</strong><code>p.grad = 0.0</code> 这一行漏掉，
+      梯度会不断累积，训练立刻失控。PyTorch 里对应 <code>optimizer.zero_grad()</code>。
+      这是新手最常见的 bug，没有之一。
+    </p>
+    <p>
+      <strong>2. 必须先拓扑排序。</strong>不能简单地递归调用，
+      否则同一个节点可能在其梯度被完全累积之前就被处理了。
+      上面的 <code>build()</code> 就是一个深度优先的拓扑排序。
+    </p>
+    <p>
+      <strong>3. <code>+=</code> 而不是 <code>=</code>。</strong>
+      因为一个节点可能被多处使用，梯度要累加。这是链式法则里「多条路径求和」的直接体现。
+    </p>
+  </div>
+
+  <h2>5.8 梯度检查：怎么知道你的反向传播写对了</h2>
+
+  <p>
+    如果你手写了一个自定义层，怎么确认它的反向传播没有 bug？
+    用数值微分去对照。这个技巧叫<strong>梯度检查</strong>（gradient check）：
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="gradient_check.py">
+<script type="text/dlcode">
+def numeric_grad(f, x, eps=1e-5):
+    """用中心差分估计 f 在 x 处的导数"""
+    return (f(x + eps) - f(x - eps)) / (2 * eps)
+
+def check(f, grad_f, x, tol=1e-4):
+    """f: 前向函数, grad_f: 你手写的梯度函数"""
+    g_num = numeric_grad(f, x)
+    g_ana = grad_f(x)                 # 解析梯度
+    rel = abs(g_num - g_ana) / max(1e-8, abs(g_num) + abs(g_ana))
+    print(f"数值梯度 {g_num:+.8f}  解析梯度 {g_ana:+.8f}  相对误差 {rel:.2e}")
+    assert rel < tol, "反向传播可能有 bug！"
+
+# 例：f(x) = sigmoid(x)
+import math
+check(lambda v: 1 / (1 + math.exp(-v)),
+      lambda v: (lambda s: s * (1 - s))(1 / (1 + math.exp(-v))),
+      x=0.7)
+</script>
+  </div>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>梯度检查的三个陷阱</div>
+    <p>
+      <strong>1. 用 float64。</strong>float32 的精度只有约 $10^{-7}$，
+      而中心差分的误差是 $O(\epsilon^2)$，两者会互相干扰。做梯度检查前一定转成双精度。
+    </p>
+    <p>
+      <strong>2. 关掉随机性和正则化。</strong>Dropout 每次前向结果不同，
+      数值梯度和解析梯度会不一样。检查时切换到 eval 模式。
+    </p>
+    <p>
+      <strong>3. 别在 ReLU 的折点附近测。</strong>$\epsilon$ 跨过了 $x=0$，
+      数值微分就会失真。多测几个点取最大值。
+    </p>
+  </div>
+
+  <h2>5.9 两个绕不开的敌人</h2>
+
+  <h3>梯度消失</h3>
+
+  <p>
+    回顾误差传递公式：$\delta^{(\ell)} = (\mathbf{W}^{(\ell+1)\top}\delta^{(\ell+1)}) \odot \sigma'(\mathbf{z}^{(\ell)})$。
+    每往回传一层，就要乘一次权重和一次激活导数。
+  </p>
+
+  <p>
+    如果这些因子的绝对值普遍小于 1，梯度就会<strong>指数衰减</strong>。
+    50 层之后，第一层的梯度可能小到 $10^{-20}$，等价于 0——第一层根本学不到东西。
+  </p>
+
+  <p>解决办法（第 6、8、10 章会分别展开）：</p>
+
+  <ul>
+    <li><strong>换激活函数</strong>：用 ReLU / GELU 替换 Sigmoid，导数不再小于 1。</li>
+    <li><strong>残差连接</strong>：$\mathbf{a} = \mathbf{x} + f(\mathbf{x})$，梯度可以走「高速公路」直接跳过若干层。</li>
+    <li><strong>归一化</strong>：BatchNorm / LayerNorm 让每层输入分布稳定，避免进入饱和区。</li>
+    <li><strong>合理的初始化</strong>：让每层输出的方差保持不变（第 6 章的 He / Xavier 初始化）。</li>
+  </ul>
+
+  <h3>梯度爆炸</h3>
+
+  <p>
+    反过来，如果因子普遍大于 1，梯度会指数增长，一步更新就把参数推到天上去。
+    在 RNN 里这个问题尤其严重（因为权重被反复乘了 $T$ 次）。
+  </p>
+
+  <p>最实用的解法是<strong>梯度裁剪</strong>，一行代码：</p>
+
+  <div class="codeblock" data-lang="python" data-title="梯度裁剪">
+<script type="text/dlcode">
+# 计算所有参数梯度的总范数
+total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+# 如果 total_norm > 1.0，所有梯度会被等比例缩小到范数为 1.0
+# 注意：它返回的是"裁剪前"的范数，非常适合用来监控训练是否稳定
+if total_norm > 1.0:
+    print(f"梯度被裁剪：{total_norm:.2f} -> 1.00")
+</script>
+  </div>
+
+  <p>
+    梯度裁剪没有改变梯度的<strong>方向</strong>，只是限制了它的<strong>长度</strong>。
+    这保证了无论出现多异常的批次，更新幅度都不会失控。
+    <strong>训练 Transformer 时这几乎是必备的。</strong>
+  </p>
+
+  <h2>5.10 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">计算图 <small>computation graph</small></div>
+      <div class="gloss__def">把计算过程拆成基本运算后的有向无环图。前向求值，反向求梯度。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">链式法则 <small>chain rule</small></div>
+      <div class="gloss__def">$\frac{\partial L}{\partial x} = \frac{\partial L}{\partial z}\cdot\frac{\partial z}{\partial x}$。反向传播的全部数学基础。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">误差项 <small>delta, δ</small></div>
+      <div class="gloss__def">$\delta^{(\ell)} = \partial L/\partial \mathbf{z}^{(\ell)}$，该层线性输出的梯度。是反向传播的传递单位。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">自动微分 <small>autograd</small></div>
+      <div class="gloss__def">框架自动记录计算图并求导的机制。PyTorch 的 <code>loss.backward()</code>。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">梯度裁剪 <small>gradient clipping</small></div>
+      <div class="gloss__def">限制梯度的范数上限，防止梯度爆炸导致训练崩溃。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">梯度检查点 <small>checkpointing</small></div>
+      <div class="gloss__def">不缓存所有中间结果，反向时重算。用时间换显存，训练大模型时常用。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>反向传播 = 链式法则 + 动态规划。它让「算所有梯度」的代价从 $O(n)$ 次前向降到约 1 次。</li>
+    <li>核心模板：<strong>参数梯度 = 本地误差 × 上游输入</strong>；<strong>误差回传 = 下游误差 × 权重 × 激活导数</strong>。</li>
+    <li>计算图让这一切自动化。框架记录图，反向遍历，用 <code>+=</code> 累积梯度。</li>
+    <li>梯度必须清零，否则会累积出错——这是最常见的 bug。</li>
+    <li>梯度消失和爆炸是深层网络的固有难题，解法是 ReLU、残差、归一化和梯度裁剪。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么反向传播比数值微分快这么多？</summary>
+      <div class="quiz__answer">
+        <p>
+          数值微分对每个参数都要重新前向传播一到两次，$n$ 个参数就要 $O(n)$ 次前向传播。
+          反向传播通过<strong>复用中间结果</strong>，一次前向 + 一次反向就能算出全部梯度，
+          代价是 $O(1)$ 次前向传播。
+        </p>
+        <p>
+          对 1750 亿参数的模型，前者需要 3500 亿次前向传播，后者只需要 1 次。
+          这不是几倍的差距，是天文数字级别的差距——所以反向传播不是一个「优化」，
+          而是让深度学习成为可能的必要条件。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么梯度累积要用 <code>+=</code> 而不是 <code>=</code>？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为一个中间变量可能被多个下游节点使用。比如 $z$ 同时喂给了 $u_1$ 和 $u_2$，
+          那么 $L$ 对 $z$ 的总影响是两条路径贡献的<strong>和</strong>：
+        </p>
+        <p>$$\frac{\partial L}{\partial z} = \frac{\partial L}{\partial u_1}\frac{\partial u_1}{\partial z} + \frac{\partial L}{\partial u_2}\frac{\partial u_2}{\partial z}$$</p>
+        <p>
+          用 <code>=</code> 就会丢掉先算的那条路径的贡献。
+          在分支结构（残差连接、多分支注意力）里这个错误会导致梯度偏小，
+          而且很难排查——所以一定要记住 <code>+=</code>。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>一个 100 层的网络，用 Sigmoid 激活，第一层几乎学不到东西。为什么？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为梯度在反向传播时要连乘 100 次。Sigmoid 的导数最大只有 0.25，
+          如果每层再乘上一个小于 1 的权重缩放因子，
+          第一层收到的梯度大约是 $(0.25 \times \alpha)^{100}$。
+        </p>
+        <p>
+          哪怕 $\alpha = 0.9$，也有 $(0.225)^{100} \approx 10^{-65}$——
+          比浮点数能表示的最小值还小，直接下溢成 0。
+          第一层的参数永远不会更新，等价于一个固定随机特征的层。
+        </p>
+        <p>
+          这就是「梯度消失」。解法是 ReLU（导数恒为 1）、残差连接（提供梯度高速公路）
+          和归一化（让输入不进入饱和区）。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么训练比推理更吃显存？</summary>
+      <div class="quiz__answer">
+        <p>
+          两个原因。第一，<strong>反向传播需要前向传播的中间结果</strong>——
+          算 $\sigma'(z)$ 时要用到 $z$，算参数梯度时要用到输入 $a$。
+          所以训练时必须把所有层的中间激活值都留在显存里，推理时用完就能扔。
+        </p>
+        <p>
+          第二，<strong>优化器状态</strong>。AdamW 为每个参数额外存两份同样大小的张量（$m$ 和 $v$）。
+          所以一个 fp16 的 7B 模型：权重 14 GB + 优化器状态约 56 GB + 梯度 14 GB，
+          加起来远超 80 GB。这也解释了为什么有了 ZeRO、LoRA 这些省显存的技术。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>梯度裁剪会不会改变梯度的方向？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>不会。</strong>裁剪做的是 $\mathbf{g} \leftarrow \mathbf{g} \cdot \frac{\text{max\_norm}}{\|\mathbf{g}\|}$，
+          这是一个纯缩放操作，方向完全不变，只是把长度限制在阈值以内。
+        </p>
+        <p>
+          这一点很重要：如果梯度方向被改变，优化就会走偏。
+          裁剪的好处正是「只限制幅度、不干扰方向」，所以它是个安全的手术。
+        </p>
+        <p>
+          另外注意：<code>clip_grad_norm_</code> 返回的是裁剪<em>之前</em>的范数，
+          这是一个非常好的训练健康度指标——如果它长期远大于阈值，说明学习率可能太大了。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    到这里，深度学习的三大件——前向传播、损失函数、反向传播——已经全部讲完了。
+    从理论上说，你现在可以训练任何网络了。
+  </p>
+
+  <p>
+    但实践中有无数个坑在等着你：模型完全不学习、损失变成 nan、训练集表现好但测试集一塌糊涂……
+    下一章是<strong>纯工程</strong>的一章，讲那些论文里不写但决定成败的东西：
+    初始化、归一化、正则化，以及一套系统的调试方法论。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

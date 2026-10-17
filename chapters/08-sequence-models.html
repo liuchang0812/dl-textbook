@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 8 章 · 序列模型与记忆 — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="08">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 8 章 · 第三部 结构篇</span>
+    <h1>序列模型与记忆</h1>
+    <p class="chapter-head__lead">
+      「狗咬人」和「人咬狗」用的是同样的词，意思却完全相反。
+      序列数据的意义藏在<strong>顺序</strong>里。
+      这一章讲 RNN 如何用「隐藏状态」实现记忆，
+      LSTM 如何用「门」修补它，以及它们为什么最终输给了注意力机制。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 30 分钟</span>
+      <span>🎯 理解循环结构、梯度消失与门控</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>8.1 序列数据：顺序就是信息</h2>
+
+  <p>
+    前面的 CNN 处理的是图像——一种二维的、位置相对固定的数据。
+    但世界上还有另一类数据，它的意义完全依赖于<strong>顺序</strong>：
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>类型</th><th>例子</th><th>顺序的含义</th></tr></thead>
+      <tbody>
+        <tr><td>文本</td><td>「猫追老鼠」vs「老鼠追猫」</td><td>谁是主语，谁是宾语</td></tr>
+        <tr><td>语音</td><td>一串声波采样点</td><td>音节的先后构成词</td></tr>
+        <tr><td>时间序列</td><td>股价、气温、心电图</td><td>因果关系只能从过去指向未来</td></tr>
+        <tr><td>用户行为</td><td>点击 → 加购 → 下单</td><td>行为之间有逻辑链条</td></tr>
+        <tr><td>代码</td><td>一个函数的前后文</td><td>变量在使用前必须定义</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>这类数据有两个共同的难点：</p>
+
+  <ul>
+    <li><strong>长度可变。</strong>有的句子 5 个词，有的 500 个词。全连接层要求固定输入维度。</li>
+    <li><strong>长距离依赖。</strong>「我出生在<b>法国</b>，……（中间省略 200 字）……，所以我说一口流利的<b>____</b>」——
+      这个空要填「法语」，但线索在 200 个字之前。</li>
+  </ul>
+
+  <h3>一个天真的想法：定长窗口</h3>
+
+  <p>
+    最直接的做法是把最近 $n$ 个词拼成一个向量喂给全连接网络，像这样预测下一个词：
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="定长窗口语言模型">
+<script type="text/dlcode">
+# 用前 3 个词预测第 4 个词
+# "我 爱 吃" -> "饭"
+
+vocab = ["我", "爱", "吃", "饭", "你", "他", "喝", "水"]
+window = 3
+
+# 输入是 3 个词的 one-hot 拼接，维度 3 * len(vocab)
+X = [[1,0,0,0,0,0,0,0,  0,1,0,0,0,0,0,0,  0,0,1,0,0,0,0,0]]
+y = [0,0,0,1,0,0,0,0]     # "饭"
+</script>
+  </div>
+
+  <p>这个方案能work，但有两个明显缺陷：</p>
+
+  <ol>
+    <li><strong>窗口外的信息全部丢失。</strong>窗口设 3，就永远看不到第 4 个词之前的内容。</li>
+    <li><strong>参数量随窗口线性增长。</strong>想要看 100 个词？输入维度就爆炸了。</li>
+    <li><strong>每个位置有独立的参数。</strong>「我」在位置 1 和位置 2 用的是完全不同的权重，
+      模型需要为每个位置重复学习同样的模式。</li>
+  </ol>
+
+  <p>
+    第三点尤其致命——它和上一章「权值共享」的问题一模一样。
+    我们希望有一种机制，能够<strong>在所有时间步上共享同一套参数</strong>，
+    并且能把信息从过去传递到现在。这就是 RNN。
+  </p>
+
+  <h2>8.2 RNN：一个会记住东西的神经元</h2>
+
+  <p>
+    循环神经网络（Recurrent Neural Network）的核心想法只有一句话：
+    <strong>把上一个时间步的输出，当作这一个时间步的额外输入。</strong>
+  </p>
+
+  <div class="formula">
+    $$\mathbf{h}_t = \tanh(\mathbf{W}_{xh}\mathbf{x}_t + \mathbf{W}_{hh}\mathbf{h}_{t-1} + \mathbf{b}_h)$$
+    $$\hat{\mathbf{y}}_t = \text{softmax}(\mathbf{W}_{hy}\mathbf{h}_t + \mathbf{b}_y)$$
+    <div class="formula__caption">
+      $\mathbf{h}_t$ 叫<strong>隐藏状态</strong>，它是网络对「到目前为止读过的所有内容」的压缩总结
+    </div>
+  </div>
+
+  <p>
+    请特别注意：$\mathbf{W}_{hh}$ 这个矩阵在<strong>每一个时间步都是同一个</strong>。
+    这就是权值共享在时间维度上的体现，也是 RNN 能处理任意长度序列的原因——
+    无论序列多长，参数量都是固定的。
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 560 210" role="img" aria-label="RNN 展开成时间步的示意图">
+      <defs>
+        <marker id="ar8" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--line-2)"></path>
+        </marker>
+      </defs>
+
+      <!-- 三个时间步 -->
+      <g font-family="monospace" font-size="12" text-anchor="middle" dominant-baseline="central">
+        <!-- 时间步 1 -->
+        <circle cx="80" cy="70" r="24" fill="var(--brand-soft)" stroke="var(--brand-line)" stroke-width="2"></circle>
+        <text x="80" y="70" fill="var(--brand)">h₁</text>
+        <rect x="52" y="146" width="56" height="26" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="80" y="159" fill="var(--ink-2)">x₁</text>
+
+        <!-- 时间步 2 -->
+        <circle cx="240" cy="70" r="24" fill="var(--brand-soft)" stroke="var(--brand-line)" stroke-width="2"></circle>
+        <text x="240" y="70" fill="var(--brand)">h₂</text>
+        <rect x="212" y="146" width="56" height="26" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="240" y="159" fill="var(--ink-2)">x₂</text>
+
+        <!-- 时间步 3 -->
+        <circle cx="400" cy="70" r="24" fill="var(--brand-soft)" stroke="var(--brand-line)" stroke-width="2"></circle>
+        <text x="400" y="70" fill="var(--brand)">h₃</text>
+        <rect x="372" y="146" width="56" height="26" rx="6" fill="var(--surface-2)" stroke="var(--line-2)"></rect>
+        <text x="400" y="159" fill="var(--ink-2)">x₃</text>
+
+        <!-- 输出 -->
+        <text x="80" y="24" fill="var(--accent)" font-size="11">ŷ₁</text>
+        <text x="240" y="24" fill="var(--accent)" font-size="11">ŷ₂</text>
+        <text x="400" y="24" fill="var(--accent)" font-size="11">ŷ₃</text>
+      </g>
+
+      <!-- 箭头：输入向上 -->
+      <g stroke="var(--line-2)" stroke-width="1.6" fill="none" marker-end="url(#ar8)">
+        <line x1="80" y1="146" x2="80" y2="97"></line>
+        <line x1="240" y1="146" x2="240" y2="97"></line>
+        <line x1="400" y1="146" x2="400" y2="97"></line>
+        <line x1="80" y1="46" x2="80" y2="32"></line>
+        <line x1="240" y1="46" x2="240" y2="32"></line>
+        <line x1="400" y1="46" x2="400" y2="32"></line>
+      </g>
+
+      <!-- 箭头：隐藏状态向右传递（同一套权重） -->
+      <g stroke="var(--brand)" stroke-width="2.4" fill="none" marker-end="url(#ar8)">
+        <line x1="106" y1="70" x2="212" y2="70"></line>
+        <line x1="266" y1="70" x2="372" y2="70"></line>
+      </g>
+      <g font-family="sans-serif" font-size="11" fill="var(--brand)">
+        <text x="159" y="60" text-anchor="middle">W_hh</text>
+        <text x="319" y="60" text-anchor="middle">W_hh</text>
+      </g>
+      <text x="159" y="90" text-anchor="middle" font-size="10" fill="var(--ink-4)" font-family="sans-serif">同一套参数</text>
+      <text x="319" y="90" text-anchor="middle" font-size="10" fill="var(--ink-4)" font-family="sans-serif">同一套参数</text>
+
+      <text x="480" y="70" font-size="11" fill="var(--ink-3)" font-family="sans-serif">← 同一组权重</text>
+      <text x="480" y="88" font-size="11" fill="var(--ink-3)" font-family="sans-serif">   在每个时间步复用</text>
+    </svg>
+    <div class="figure__caption">
+      <b>RNN 展开图。</b>左边是循环的写法，展开后就是一条链。
+      每个 $\mathbf{h}_t$ 既接收当前的输入 $\mathbf{x}_t$，也接收上一步的记忆 $\mathbf{h}_{t-1}$。
+    </div>
+  </div>
+
+  <p>
+    你可以把 $\mathbf{h}_t$ 理解成一个<strong>固定大小的便签</strong>：
+    每读一个新词，就用橡皮擦掉一部分旧内容，写上一些新内容。
+    它必须把「到目前为止读过的所有内容」压缩进固定维度的向量里。
+  </p>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>一个很有用的类比</div>
+    <p>
+      想象你在读一本侦探小说，每读一页就合上书，凭记忆写下「目前为止的案情摘要」，
+      然后只看这份摘要 + 下一页继续推理。
+    </p>
+    <p>
+      这份摘要就是 $\mathbf{h}_t$。它的维度是固定的（比如 256 维），
+      但小说的内容可以无限长。<strong>信息必然会被压缩和丢失</strong>——
+      这个「固定容量的瓶颈」，正是 RNN 一切问题的根源。
+    </p>
+  </div>
+
+  <h2>8.3 训练 RNN：沿时间反向传播</h2>
+
+  <p>
+    训练 RNN 用的还是反向传播，只是要把展开后的时间链一起考虑，叫 <strong>BPTT</strong>
+    （Backpropagation Through Time，沿时间反向传播）。
+  </p>
+
+  <p>
+    因为 $\mathbf{h}_t$ 依赖于 $\mathbf{h}_{t-1}$，而 $\mathbf{h}_{t-1}$ 又依赖于 $\mathbf{h}_{t-2}$……
+    所以计算 $t=1$ 处的梯度时，要沿着整条链乘回去：
+  </p>
+
+  <div class="formula">
+    $$\frac{\partial L}{\partial \mathbf{h}_1}
+    = \frac{\partial L}{\partial \mathbf{h}_T}
+      \prod_{t=2}^{T} \frac{\partial \mathbf{h}_t}{\partial \mathbf{h}_{t-1}}
+    = \frac{\partial L}{\partial \mathbf{h}_T}
+      \prod_{t=2}^{T} \mathbf{W}_{hh}^\top \text{diag}\!\left(1-\mathbf{h}_t^2\right)$$
+    <div class="formula__caption">$\tanh$ 的导数是 $1-h^2$，最大值为 1</div>
+  </div>
+
+  <p>
+    看到那个连乘了吗？它和上一章残差连接之前的问题完全一样：
+    <strong>连乘 $T$ 次，结果会指数级地衰减或爆炸。</strong>
+  </p>
+
+  <p>
+    拖动滑块，看看「循环权重的大小」如何决定梯度能不能传回早期的时间步：
+  </p>
+
+  <div class="widget" data-widget="vanishing">
+    <div class="widget__head"><span class="tag">交互 9</span>梯度随时间步衰减</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <canvas data-h="300"></canvas>
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">循环权重的有效缩放 w</span><span class="ctrl__val" data-v="w">0.90</span></div>
+            <input type="range" data-p="w" min="0.5" max="1.5" step="0.01" value="0.9">
+          </div>
+          <div class="readout" data-role="info" style="margin-top:.8rem"></div>
+          <p class="widget__note" style="margin-top:.8rem">
+            纵轴是对数刻度（$10^{0}$ 到 $10^{-12}$）。柱子高度表示「$t$ 步之前的梯度」还剩多少。
+          </p>
+        </div>
+      </div>
+      <p class="widget__note">
+        注意 $w=0.9$ 时，30 步之前的梯度只剩约 $10^{-1.4}$——听起来还行，
+        但 100 步之前就只剩 $10^{-5}$，1000 步是 $10^{-46}$，彻底消失了。
+        而 $w=1.05$ 时梯度会指数爆炸。要让梯度稳定，$w$ 必须<strong>精确地</strong>接近 1，
+        这个要求在实践中几乎无法满足。
+      </p>
+    </div>
+  </div>
+
+  <div class="keyidea">
+    <div class="keyidea__label">RNN 的根本困境</div>
+    <p>
+      同一个矩阵 $\mathbf{W}_{hh}$ 被反复相乘。它的<strong>特征值</strong>决定了信息的命运：<br>
+      · 小于 1 → 梯度指数衰减，学不到长期依赖（<em>梯度消失</em>）<br>
+      · 大于 1 → 梯度指数爆炸，训练崩溃（<em>梯度爆炸</em>）
+    </p>
+    <p>
+      要让梯度恰好稳定，所有特征值都必须接近 1。这不是调参能解决的，
+      是<strong>结构本身</strong>的缺陷。
+    </p>
+  </div>
+
+  <p>
+    梯度爆炸可以用梯度裁剪缓解（第 5 章讲过）。
+    但梯度消失没有便宜的解法——于是有了 LSTM。
+  </p>
+
+  <h2>8.4 LSTM：用「门」来控制记忆</h2>
+
+  <p>
+    1997 年，Hochreiter 和 Schmidhuber 提出了<strong>长短期记忆网络</strong>（LSTM）。
+    它的核心创新是引入了一条独立的<strong>细胞状态</strong>（cell state）$\mathbf{c}_t$，
+    以及三个「门」来控制信息怎么进出。
+  </p>
+
+  <p>门的本质是一个 sigmoid 层：输出 0 到 1 之间的数，表示「让多少信息通过」。</p>
+
+  <ul>
+    <li><strong>遗忘门</strong> $\mathbf{f}_t$：决定从旧记忆中丢掉什么。</li>
+    <li><strong>输入门</strong> $\mathbf{i}_t$：决定往记忆里写入什么新内容。</li>
+    <li><strong>输出门</strong> $\mathbf{o}_t$：决定这一时刻对外输出记忆的哪一部分。</li>
+  </ul>
+
+  <div class="formula">
+    $$\begin{aligned}
+    \mathbf{f}_t &= \sigma(\mathbf{W}_f[\mathbf{h}_{t-1}, \mathbf{x}_t] + \mathbf{b}_f) &&\text{遗忘门}\\
+    \mathbf{i}_t &= \sigma(\mathbf{W}_i[\mathbf{h}_{t-1}, \mathbf{x}_t] + \mathbf{b}_i) &&\text{输入门}\\
+    \tilde{\mathbf{c}}_t &= \tanh(\mathbf{W}_c[\mathbf{h}_{t-1}, \mathbf{x}_t] + \mathbf{b}_c) &&\text{候选记忆}\\
+    \mathbf{c}_t &= \mathbf{f}_t \odot \mathbf{c}_{t-1} + \mathbf{i}_t \odot \tilde{\mathbf{c}}_t &&\text{更新记忆}\\
+    \mathbf{o}_t &= \sigma(\mathbf{W}_o[\mathbf{h}_{t-1}, \mathbf{x}_t] + \mathbf{b}_o) &&\text{输出门}\\
+    \mathbf{h}_t &= \mathbf{o}_t \odot \tanh(\mathbf{c}_t) &&\text{输出}
+    \end{aligned}$$
+    <div class="formula__caption">$[\mathbf{h}_{t-1}, \mathbf{x}_t]$ 表示两个向量拼接；$\odot$ 是逐元素相乘</div>
+  </div>
+
+  <p>看起来公式很多，但真正关键的是这一行：</p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">LSTM 的关键</div>
+    <p>$$\mathbf{c}_t = \mathbf{f}_t \odot \mathbf{c}_{t-1} + \mathbf{i}_t \odot \tilde{\mathbf{c}}_t$$</p>
+    <p>
+      注意这里是<strong>加法</strong>，不是矩阵乘法。记忆 $\mathbf{c}$ 沿着一条「传送带」
+      从 $t=1$ 一路流到 $t=T$，中间只经过逐元素的乘法和加法。
+    </p>
+    <p>
+      这意味着：如果遗忘门 $\mathbf{f}_t \approx 1$，那么 $\mathbf{c}_t \approx \mathbf{c}_{t-1}$，
+      记忆可以<strong>无损地穿过任意多的时间步</strong>。
+      梯度也能沿着这条加法路径稳定地回传，不再指数衰减。
+    </p>
+    <p>
+      这和残差连接 $\mathbf{y} = \mathbf{x} + F(\mathbf{x})$ 是同一个思想——
+      <strong>用一条加法通路给梯度开高速公路</strong>。区别只是 LSTM 早了 18 年。
+    </p>
+  </div>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>用「记笔记」理解 LSTM</div>
+    <p>
+      普通 RNN 像一个只能记住一句话的人：每听到新的一句，就得把旧的整句改写一遍，
+      越早的内容被改写得越模糊。
+    </p>
+    <p>
+      LSTM 像一个会用笔记本的人：<br>
+      · <strong>遗忘门</strong>：翻到笔记某一页，擦掉过时的内容（「刚才那个电话号码已经用完了」）。<br>
+      · <strong>输入门</strong>：判断新信息值不值得记，值得才写上去。<br>
+      · <strong>输出门</strong>：现在要回答问题，只从笔记本里挑相关的那几行念出来，而不是把整本笔记都倒出来。
+    </p>
+    <p>
+      笔记本本身（$\mathbf{c}_t$）不会被频繁改写，所以长期信息能保存得很好。
+    </p>
+  </div>
+
+  <h2>8.5 GRU：LSTM 的精简版</h2>
+
+  <p>
+    2014 年提出的 GRU（Gated Recurrent Unit）把三个门简化成了两个，
+    并且把细胞状态和隐藏状态合并成一个：
+  </p>
+
+  <div class="formula">
+    $$\begin{aligned}
+    \mathbf{z}_t &= \sigma(\mathbf{W}_z[\mathbf{h}_{t-1},\mathbf{x}_t]) &&\text{更新门（合并了遗忘+输入）}\\
+    \mathbf{r}_t &= \sigma(\mathbf{W}_r[\mathbf{h}_{t-1},\mathbf{x}_t]) &&\text{重置门}\\
+    \tilde{\mathbf{h}}_t &= \tanh(\mathbf{W}[\mathbf{r}_t \odot \mathbf{h}_{t-1}, \mathbf{x}_t])\\
+    \mathbf{h}_t &= (1-\mathbf{z}_t)\odot\mathbf{h}_{t-1} + \mathbf{z}_t \odot \tilde{\mathbf{h}}_t
+    \end{aligned}$$
+  </div>
+
+  <p>
+    GRU 的参数比 LSTM 少约 25%，训练更快。实践中两者的效果往往很接近，
+    没有哪一方有压倒性优势——<strong>选哪个通常取决于具体任务和算力预算</strong>。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th>RNN</th><th>LSTM</th><th>GRU</th></tr></thead>
+      <tbody>
+        <tr><td>状态</td><td>1 个（h）</td><td>2 个（h, c）</td><td>1 个（h）</td></tr>
+        <tr><td>门数量</td><td>0</td><td>3</td><td>2</td></tr>
+        <tr><td>参数量（相对）</td><td>1×</td><td>4×</td><td>3×</td></tr>
+        <tr><td>长距离依赖</td><td>❌ 差</td><td>✅ 好</td><td>✅ 好</td></tr>
+        <tr><td>训练速度</td><td>最快</td><td>最慢</td><td>中等</td></tr>
+        <tr><td>现状</td><td>教学用</td><td>仍是时序任务的强基线</td><td>LSTM 的轻量替代</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>8.6 双向与深层 RNN</h2>
+
+  <h3>双向 RNN</h3>
+
+  <p>
+    有些任务里，答案需要同时看前后文。比如词性标注：「book」是名词还是动词？
+    看「I read a book」是名词，看「I book a ticket」是动词——<strong>需要看后面的词</strong>。
+  </p>
+
+  <p>
+    双向 RNN 跑两个独立的 RNN：一个从左到右，一个从右到左，
+    然后把两个隐藏状态拼接起来。这样每个位置都能看到完整的上下文。
+  </p>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>双向 RNN 不能用于生成</div>
+    <p>
+      双向 RNN 需要看到「未来」的输入。对于分类、标注这类<strong>看完整句话再回答</strong>的任务没问题，
+      但语言模型是<strong>从左到右一个字一个字生成</strong>的，生成第 5 个字时还没有第 6 个字。
+    </p>
+    <p>
+      所以 GPT 这类自回归模型只能用单向（因果）结构。BERT 用了双向，
+      但它不是生成模型，而是「完形填空」模型——这是第 11 章的话题。
+    </p>
+  </div>
+
+  <h3>深层 RNN</h3>
+
+  <p>
+    把多个 RNN 层堆起来，第一层的输出序列作为第二层的输入。
+    但注意：<strong>RNN 的深度不能像 CNN 那样随便堆</strong>，
+    因为时间维度上的连乘已经让梯度很脆弱了，再叠加层数会雪上加霜。
+    实践中 2~4 层就很常见了。
+  </p>
+
+  <h2>8.7 Seq2Seq：翻译是怎么做的</h2>
+
+  <p>
+    2014 年，Sutskever 等人提出了<strong>序列到序列</strong>（seq2seq）架构，
+    用两个 RNN 解决「输入和输出都是变长序列」的问题：
+  </p>
+
+  <div class="figure">
+    <svg viewBox="0 0 560 230" role="img" aria-label="编码器-解码器架构">
+      <defs>
+        <marker id="ar9" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 z" fill="var(--line-2)"></path>
+        </marker>
+      </defs>
+
+      <!-- 编码器 -->
+      <text x="120" y="22" font-size="12" font-weight="700" fill="var(--brand)" text-anchor="middle" font-family="sans-serif">编码器 Encoder</text>
+      <g font-family="monospace" font-size="11" text-anchor="middle" dominant-baseline="central">
+        <circle cx="50" cy="80" r="19" fill="var(--brand-soft)" stroke="var(--brand-line)" stroke-width="2"></circle>
+        <text x="50" y="80" fill="var(--brand)">h</text>
+        <circle cx="110" cy="80" r="19" fill="var(--brand-soft)" stroke="var(--brand-line)" stroke-width="2"></circle>
+        <text x="110" y="80" fill="var(--brand)">h</text>
+        <circle cx="170" cy="80" r="19" fill="var(--brand-soft)" stroke="var(--brand-line)" stroke-width="2"></circle>
+        <text x="170" y="80" fill="var(--brand)">h</text>
+      </g>
+      <g stroke="var(--brand)" stroke-width="2" fill="none" marker-end="url(#ar9)">
+        <line x1="69" y1="80" x2="91" y2="80"></line>
+        <line x1="129" y1="80" x2="151" y2="80"></line>
+      </g>
+      <g font-size="11" fill="var(--ink-2)" font-family="sans-serif" text-anchor="middle">
+        <text x="50" y="130">I</text><text x="110" y="130">love</text><text x="170" y="130">you</text>
+      </g>
+
+      <!-- 瓶颈 -->
+      <path d="M196,80 L246,80" stroke="var(--accent)" stroke-width="2.6" fill="none" marker-end="url(#ar9)"></path>
+      <rect x="200" y="52" width="46" height="26" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="223" y="65" font-size="10" fill="var(--accent)" text-anchor="middle" font-family="monospace">c</text>
+      <text x="223" y="42" font-size="10.5" fill="var(--accent)" text-anchor="middle" font-family="sans-serif">上下文向量</text>
+
+      <!-- 解码器 -->
+      <text x="420" y="22" font-size="12" font-weight="700" fill="var(--violet)" text-anchor="middle" font-family="sans-serif">解码器 Decoder</text>
+      <g font-family="monospace" font-size="11" text-anchor="middle" dominant-baseline="central">
+        <circle cx="290" cy="80" r="19" fill="var(--violet-soft)" stroke="var(--violet)" stroke-width="2" opacity=".85"></circle>
+        <text x="290" y="80" fill="var(--violet)">h</text>
+        <circle cx="350" cy="80" r="19" fill="var(--violet-soft)" stroke="var(--violet)" stroke-width="2" opacity=".85"></circle>
+        <text x="350" y="80" fill="var(--violet)">h</text>
+        <circle cx="410" cy="80" r="19" fill="var(--violet-soft)" stroke="var(--violet)" stroke-width="2" opacity=".85"></circle>
+        <text x="410" y="80" fill="var(--violet)">h</text>
+      </g>
+      <g stroke="var(--violet)" stroke-width="2" fill="none" marker-end="url(#ar9)">
+        <line x1="309" y1="80" x2="331" y2="80"></line>
+        <line x1="369" y1="80" x2="391" y2="80"></line>
+      </g>
+      <g font-size="11" fill="var(--ink-2)" font-family="sans-serif" text-anchor="middle">
+        <text x="290" y="130">我</text><text x="350" y="130">爱</text><text x="410" y="130">你</text>
+      </g>
+
+      <!-- 底部说明 -->
+      <text x="280" y="180" font-size="11.5" fill="var(--ink-3)" text-anchor="middle" font-family="sans-serif">
+        整个输入序列「I love you」被压缩进一个固定长度的向量 c
+      </text>
+      <text x="280" y="202" font-size="11.5" fill="var(--danger)" text-anchor="middle" font-family="sans-serif">
+        ⚠ 这就是瓶颈：句子越长，c 丢的信息越多
+      </text>
+    </svg>
+    <div class="figure__caption">
+      <b>编码器-解码器架构。</b>编码器把输入句子读成一个向量，
+      解码器从这个向量出发，一个字一个字地生成输出。
+    </div>
+  </div>
+
+  <p>
+    这个架构在短句上表现不错，但有一个明显的瓶颈：
+    <strong>无论输入多长，都必须压缩进一个固定维度的向量 $\mathbf{c}$。</strong>
+  </p>
+
+  <p>
+    一个 50 个词的句子和一个 5 个词的句子，用的是同样大小的向量。
+    句子越长，信息损失越严重。翻译长句时，解码器常常「忘了」句子开头在说什么。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">历史性的转折点</div>
+    <p>
+      2014 年，Bahdanau 等人在解决这个瓶颈时提出了一个想法：
+      <strong>不要让解码器只看最后一个隐藏状态，而是让它回头看编码器的<em>所有</em>隐藏状态，
+      并且自己决定每一步该关注哪些位置。</strong>
+    </p>
+    <p>
+      这个机制叫<strong>注意力</strong>（attention）。它的效果立竿见影——
+      长句翻译质量大幅提升。
+    </p>
+    <p>
+      三年后，有人发表了一篇论文，标题直接写着：<em>《Attention Is All You Need》</em>。
+      他们删掉了 RNN，只保留注意力，然后改变了整个领域。
+    </p>
+  </div>
+
+  <h2>8.8 代码：手写一个 LSTM 单元</h2>
+
+  <div class="codeblock" data-lang="python" data-title="lstm.py — 从零实现 LSTM 单元">
+<script type="text/dlcode">
+import numpy as np
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
+
+class LSTMCell:
+    def __init__(self, input_size, hidden_size):
+        self.hidden_size = hidden_size
+        # 4 组权重：遗忘门 f、输入门 i、候选记忆 g、输出门 o
+        # 为了效率，把它们拼成一个大矩阵一次算完
+        scale = 1.0 / np.sqrt(hidden_size)
+        self.W = np.random.randn(4 * hidden_size, input_size + hidden_size) * scale
+        self.b = np.zeros(4 * hidden_size)
+        # 遗忘门的偏置初始化为 1：让网络一开始倾向于"记住"
+        self.b[:hidden_size] = 1.0
+
+    def forward(self, x, state):
+        h_prev, c_prev = state
+        H = self.hidden_size
+
+        # 把当前输入和上一步的隐藏状态拼接起来
+        z = np.concatenate([x, h_prev])
+        gates = self.W @ z + self.b          # (4H,)
+
+        f = sigmoid(gates[0:H])              # 遗忘门
+        i = sigmoid(gates[H:2*H])            # 输入门
+        g = np.tanh(gates[2*H:3*H])          # 候选记忆
+        o = sigmoid(gates[3*H:4*H])          # 输出门
+
+        c = f * c_prev + i * g               # ← 加法路径，记忆的"传送带"
+        h = o * np.tanh(c)
+        return h, (h, c)
+
+# 使用
+cell = LSTMCell(input_size=8, hidden_size=16)
+state = (np.zeros(16), np.zeros(16))
+for t in range(5):
+    x = np.random.randn(8)
+    h, state = cell.forward(x, state)
+    print(f"t={t}  h[0]={h[0]:+.4f}  c[0]={state[1][0]:+.4f}")
+</script>
+  </div>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>两个工程技巧</div>
+    <p>
+      <strong>1. 四组权重拼成一个大矩阵。</strong>不要写四个 <code>W_f @ z</code>，
+      而是拼成一个 <code>(4H, in+H)</code> 的矩阵一次算完。这样能利用矩阵乘法的并行性，
+      速度快好几倍，代码也更短。
+    </p>
+    <p>
+      <strong>2. 遗忘门偏置初始化为 1。</strong>这是 LSTM 原作者的建议。
+      默认状态下遗忘门输出约 0.73（而不是 0.5），网络一开始倾向于<strong>记住</strong>。
+      对长序列任务，这个小细节能明显加速收敛。
+    </p>
+  </div>
+
+  <h2>8.9 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">隐藏状态 <small>hidden state</small></div>
+      <div class="gloss__def">$\mathbf{h}_t$，RNN 对「到目前为止的输入」的固定长度压缩总结。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">BPTT</div>
+      <div class="gloss__def">沿时间反向传播。因为隐藏状态形成长链，梯度要连乘很多次。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">门控 <small>gating</small></div>
+      <div class="gloss__def">用 sigmoid 输出 0~1 的系数，控制信息通过的比例。LSTM 和 GRU 的核心。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">细胞状态 <small>cell state</small></div>
+      <div class="gloss__def">LSTM 中的 $\mathbf{c}_t$，沿加法路径传递，是长期记忆的载体。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">Seq2Seq</div>
+      <div class="gloss__def">编码器-解码器架构，把变长输入映射到变长输出。翻译、摘要的基础。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">瓶颈 <small>bottleneck</small></div>
+      <div class="gloss__def">整个输入必须压进一个固定向量。这是注意力机制诞生的直接原因。</div>
+    </div>
+  </div>
+
+  <ol>
+    <li>序列数据的关键是顺序，而全连接层处理不了变长序列和长距离依赖。</li>
+    <li>RNN 用「上一步的隐藏状态作为这一步的输入」实现记忆，权重在时间维度共享。</li>
+    <li>BPTT 要连乘 $\mathbf{W}_{hh}$ 很多次，因此梯度会指数衰减或爆炸——这是结构性的缺陷。</li>
+    <li>LSTM 用「细胞状态的加法路径 + 三个门」解决梯度消失，思想与残差连接一致。</li>
+    <li>Seq2Seq 把所有输入压进一个固定向量，形成瓶颈，这直接催生了注意力机制。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么普通 RNN 难以学习长距离依赖？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为反向传播时梯度要沿时间链连乘：$\prod_{t}\mathbf{W}_{hh}^\top\text{diag}(1-\mathbf{h}_t^2)$。
+        </p>
+        <p>
+          连乘的每一项都小于 1（因为 $\tanh$ 的导数最大是 1，而 $\mathbf{W}_{hh}$ 的谱范数通常也小于 1），
+          乘上几十上百次之后梯度就趋近于 0。结果是：
+          <strong>模型能学到「最近几个词」的规律，但对 100 步之前的线索完全不敏感。</strong>
+        </p>
+        <p>
+          反过来如果权重偏大，梯度会爆炸。而要让梯度恰好稳定，
+          需要特征值精确地接近 1——这在实践中几乎做不到。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>LSTM 的细胞状态为什么能缓解梯度消失？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为 $\mathbf{c}_t = \mathbf{f}_t \odot \mathbf{c}_{t-1} + \mathbf{i}_t \odot \tilde{\mathbf{c}}_t$
+          是一条<strong>加法路径</strong>，不经过矩阵乘法。
+        </p>
+        <p>
+          对 $\mathbf{c}_{t-1}$ 求偏导得到的就是 $\mathbf{f}_t$（逐元素），
+          而不是一个矩阵乘积。如果遗忘门接近 1，梯度就能近似无损地往回传。
+          这和残差连接的 $\partial \mathbf{y}/\partial\mathbf{x} = \mathbf{I} + \dots$ 是完全一样的思想。
+        </p>
+        <p>
+          另外，网络可以<strong>学会</strong>什么时候该遗忘（把 $\mathbf{f}_t$ 调到 0），
+          什么时候该长期保留（把 $\mathbf{f}_t$ 保持在 1）。这个「学习何时记忆」的能力
+          才是 LSTM 真正的价值。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>双向 RNN 和 GPT 能一起用吗？为什么？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>不能。</strong>双向 RNN 需要看到「未来」的输入才能计算当前位置的表示，
+          而 GPT 这类自回归模型是严格从左到右生成的——生成第 5 个词时，
+          第 6 个词还不存在。
+        </p>
+        <p>
+          如果强行使用双向结构，模型在训练时会「偷看」答案，
+          导致训练指标极好但推理时完全失效。
+        </p>
+        <p>
+          所以：BERT（双向）适合理解类任务，比如分类、抽取、问答；
+          GPT（单向）适合生成类任务。Transformer 的「因果掩码」
+          就是为了在注意力机制里强制实现这种单向性。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>Seq2Seq 的瓶颈是什么？注意力怎么解决它？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>瓶颈</strong>是：编码器必须把整个输入序列压缩成一个固定维度的向量 $\mathbf{c}$，
+          然后解码器只能从这个向量出发生成整个输出。
+          句子越长，$\mathbf{c}$ 丢的信息越多，翻译质量越差。
+        </p>
+        <p>
+          <strong>注意力的解法</strong>是：不再只传一个 $\mathbf{c}$，
+          而是把编码器<strong>每一个时间步的隐藏状态都保留下来</strong>。
+          解码器每生成一个词时，动态地计算「当前该关注输入的哪几个位置」，
+          然后对这些位置做加权求和，得到一个<em>为当前时刻定制的</em>上下文向量。
+        </p>
+        <p>
+          这样信息通路从「一个瓶颈」变成了「一条直达通道」，
+          而且长度不再是问题——因为注意力是直接连接的，不需要穿过时间链。
+          这个改动效果太好，以至于三年后有人干脆把 RNN 整个删掉了。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    我们现在站在了整个深度学习史最重要的转折点上。
+  </p>
+
+  <p>
+    注意力机制最初只是为了给 RNN 打一个补丁，但很快人们发现：
+    <strong>注意力本身就能完成序列建模，根本不需要 RNN。</strong>
+  </p>
+
+  <p>
+    下一章讲注意力的完整数学形式：Query、Key、Value 到底分别是什么，
+    为什么是「点积」而不是别的相似度度量，
+    以及「多头注意力」为什么比单头强。<strong>这是理解 GPT 的最后一关。</strong>
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>

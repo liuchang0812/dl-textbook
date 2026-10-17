@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-font="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 章 · 从规则到学习 — 深度学习之路</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-chapter="01">
+
+<div id="progress"></div>
+
+<div class="layout">
+<main class="content">
+<article class="article">
+
+  <header class="chapter-head">
+    <span class="chapter-head__eyebrow">第 1 章 · 第一部 直觉篇</span>
+    <h1>从规则到学习</h1>
+    <p class="chapter-head__lead">
+      写程序这件事，我们一直是「把规则告诉计算机」。深度学习做的恰恰相反：
+      我们只告诉它目标，让它自己找出规则。这一章讲清楚这个反转为什么重要，
+      以及「学习」这个词在数学上到底指什么。
+    </p>
+    <div class="chapter-head__meta">
+      <span>⏱ 约 18 分钟</span>
+      <span>🎯 建立「模型 / 参数 / 损失」三个核心概念</span>
+      <span>🧪 1 个交互演示</span>
+    </div>
+  </header>
+
+  <h2>1.1 一个程序员的直觉，在这里会失效</h2>
+
+  <p>
+    假设你是 1990 年代的一名工程师，老板让你写一个程序，判断一封邮件是不是垃圾邮件。
+    你的直觉很自然：找关键词。出现「中奖」「免费」「点击链接」就加分，分数超过阈值就判定为垃圾邮件。
+  </p>
+
+  <p>你写下这样的代码：</p>
+
+  <div class="codeblock" data-lang="python" data-title="规则版的垃圾邮件过滤器">
+<script type="text/dlcode">
+SPAM_WORDS = {
+    "中奖": 5, "免费": 3, "点击链接": 4, "限时": 2,
+    "转账": 5, "发票": 4, "贷款": 3,
+}
+
+def is_spam(text: str) -> bool:
+    score = sum(w for word, w in SPAM_WORDS.items() if word in text)
+    return score >= 6
+</script>
+  </div>
+
+  <p>
+    这段代码能跑，也有一点效果。但很快你就会陷入泥潭：
+  </p>
+
+  <ul>
+    <li>垃圾邮件发送者把「中奖」写成「中 奖」或者「中⭐奖」，你的规则立刻失效。</li>
+    <li>正常邮件里也可能出现「发票」——同事让你报销的时候。</li>
+    <li>你不断加规则，加到了 300 条，规则之间开始互相冲突，没人敢再动它。</li>
+    <li>更糟的是，你根本不知道这 300 条规则里哪条有用、哪条是噪音。</li>
+  </ul>
+
+  <div class="note note--warn">
+    <div class="note__title"><span class="ico">⚠</span>问题的本质</div>
+    <p>
+      你试图把一件<strong>你自己都说不清楚的事情</strong>写成明确的规则。
+      你能一眼认出垃圾邮件，但你说不出你用的是哪几条规则——你的判断来自大量经验形成的模糊直觉。
+      凡是这类「人类擅长但难以言传」的任务，传统编程都会碰壁。
+    </p>
+  </div>
+
+  <h2>1.2 反转：不写规则，只给例子</h2>
+
+  <p>
+    机器学习的做法是把问题反过来。你不再写规则，而是：
+  </p>
+
+  <ol class="steps">
+    <li>
+      <strong>收集大量「输入 → 答案」的例子</strong>
+      <p>十万封邮件，每封标注好是或不是垃圾邮件。这叫<em>训练数据</em>。</p>
+    </li>
+    <li>
+      <strong>定义一个可以调参数的「规则模板」</strong>
+      <p>比如「分数 = w₁·出现中奖 + w₂·出现免费 + …」，但这里的 w 是<em>未知的</em>，等着被算出来。</p>
+    </li>
+    <li>
+      <strong>定义一个标准，衡量当前参数错得有多离谱</strong>
+      <p>在十万封邮件上预测一遍，把错误的次数（或错误程度）加起来，得到一个数字，叫<em>损失</em>。</p>
+    </li>
+    <li>
+      <strong>自动调整参数，让这个数字尽可能小</strong>
+      <p>这一步是纯粹的数学和计算，不需要任何「智能」。它就是<em>优化</em>。</p>
+    </li>
+  </ol>
+
+  <div class="keyidea">
+    <div class="keyidea__label">第 1 章的核心</div>
+    <p>
+      传统编程：<strong>规则 + 数据 → 答案</strong>。<br>
+      机器学习：<strong>数据 + 答案 → 规则</strong>。
+    </p>
+    <p>
+      深度学习里的「深度」，指的就是这个「规则模板」由很多层复合函数堆叠而成，
+      深到人类再也看不懂它到底学到了什么规则——但它确实有用。
+    </p>
+  </div>
+
+  <p>
+    再看一个例子，感受一下这个反转有多自然。判断一张图里是不是数字「8」：
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>任务</th><th>传统编程的做法</th><th>机器学习的做法</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>识别手写数字</td>
+          <td>写规则判断有没有两个封闭环、笔画粗细…（几乎不可能写全）</td>
+          <td>给 6 万张标注好的图片，让它自己学</td>
+        </tr>
+        <tr>
+          <td>预测房价</td>
+          <td>专家拍脑袋定公式：单价 × 面积 × 楼层系数…</td>
+          <td>给 10 万条成交记录，让模型定系数</td>
+        </tr>
+        <tr>
+          <td>翻译句子</td>
+          <td>写语法规则 + 词典（试了几十年，效果很差）</td>
+          <td>给几千万对中英对照句，让它自己学</td>
+        </tr>
+        <tr>
+          <td>下围棋</td>
+          <td>把人类棋谱和定式写成规则</td>
+          <td>自己和自己下几百万局，从胜负里学</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>1.3 什么是「模型」：一个带旋钮的函数</h2>
+
+  <p>
+    现在把上面的第 2 步说精确一点。一个模型，本质上就是一个<strong>函数</strong>：
+    输入 $x$，输出预测 $\hat{y}$（读作 "y-hat"）。
+  </p>
+
+  <div class="formula">
+    $$\hat{y} = f(x;\ \theta)$$
+    <div class="formula__caption">$\theta$（theta）是所有可调参数的集合，中文叫「权重」或「参数」</div>
+  </div>
+
+  <p>
+    把它想象成一台老式收音机：$x$ 是天线收到的信号，$\theta$ 是面板上那一排旋钮，
+    $\hat{y}$ 是喇叭里放出来的声音。同一个函数形式，旋钮位置不同，输出的结果就完全不同。
+  </p>
+
+  <p>
+    最简单的模型是<strong>线性模型</strong>。假设我们要用「房屋面积」预测「房价」：
+  </p>
+
+  <div class="formula">
+    $$\hat{y} = w \cdot x + b$$
+    <div class="formula__caption">$w$ 是斜率（每多一平米，房价涨多少），$b$ 是截距（基础价）</div>
+  </div>
+
+  <p>
+    这个模型只有两个参数 $w$ 和 $b$，也就是两个旋钮。而「学习」要做的事，
+    就是把这两个旋钮拧到最合适的位置。
+  </p>
+
+  <div class="note note--intuition">
+    <div class="note__title"><span class="ico">◈</span>直觉：参数就是「记忆」</div>
+    <p>
+      一个 GPT 有几千亿个参数，听起来吓人。但请记住：<strong>参数只是数字</strong>，
+      和这里的 $w$、$b$ 没有任何本质区别。差别只在于数量，以及它们被组织成了什么结构。
+      你理解了 $w$ 和 $b$ 是怎么被调好的，就理解了全部。
+    </p>
+  </div>
+
+  <h2>1.4 损失函数：把「错得有多离谱」变成一个数字</h2>
+
+  <p>
+    要让机器自动拧旋钮，我们必须先给它一个<strong>可以比较的数字</strong>。
+    这个数字叫损失（loss），也叫代价（cost）或误差（error）。
+  </p>
+
+  <p>
+    损失函数的唯一职责是：给定当前参数，告诉我模型现在有多差。差得越多，数字越大。
+    最简单的选择是<strong>平方误差</strong>：对每一个样本，算出预测值和真实值的差，平方，再全部加起来。
+  </p>
+
+  <div class="formula">
+    $$L(w, b) = \frac{1}{n}\sum_{i=1}^{n}\left(\hat{y}^{(i)} - y^{(i)}\right)^2
+    \quad\text{其中}\quad \hat{y}^{(i)} = w x^{(i)} + b$$
+    <div class="formula__caption">
+      $n$ 是样本个数。这个式子读作：把所有样本的「预测减真实」平方后求平均，通常叫 MSE（均方误差）
+    </div>
+  </div>
+
+  <p>为什么是平方，而不是直接取绝对值？有三个理由：</p>
+
+  <ul>
+    <li><strong>正负相消问题。</strong>如果直接求和，一个样本差了 +5、另一个差了 −5，加起来是 0，看起来完美，实际错得离谱。平方让所有误差都变成正的。</li>
+    <li><strong>惩罚大错。</strong>差 10 的惩罚是差 1 的 100 倍。我们通常更讨厌偶尔的严重错误。</li>
+    <li><strong>数学上好看。</strong>平方函数光滑、处处可导，这对后面要讲的梯度下降非常重要。</li>
+  </ul>
+
+  <p>
+    现在，「学习」这件事第一次变得精确了：
+    <strong>找出让 $L(w,b)$ 最小的那组 $(w, b)$。</strong>
+  </p>
+
+  <p>亲手试一下。拖动滑块改变斜率和截距，观察损失怎么变：</p>
+
+  <div class="widget" data-widget="linefit">
+    <div class="widget__head"><span class="tag">交互 1</span>拧两个旋钮，把损失降到最低</div>
+    <div class="widget__body">
+      <div class="widget__grid">
+        <canvas data-h="340"></canvas>
+        <div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">斜率 w</span><span class="ctrl__val" data-v="w">1.00</span></div>
+            <input type="range" data-p="w" min="0" max="2" step="0.01" value="1">
+          </div>
+          <div class="ctrl">
+            <div class="ctrl__row"><span class="ctrl__label">截距 b</span><span class="ctrl__val" data-v="b">0.00</span></div>
+            <input type="range" data-p="b" min="-2" max="3" step="0.01" value="0">
+          </div>
+          <div class="btnrow">
+            <button class="btn btn--primary" data-role="auto">自动找到最优解</button>
+          </div>
+          <div class="readout" data-role="info" style="margin-top:.8rem"></div>
+        </div>
+      </div>
+      <p class="widget__note">
+        绿点是 10 条训练数据（面积 → 房价）。橙色虚线是<strong>残差</strong>——每个样本错多少。
+        浅绿虚线是真正的最优解。你会发现：不管怎么拖，损失总是一个正数，而它只有一个最低点。
+      </p>
+    </div>
+  </div>
+
+  <p>
+    玩过之后你应该注意到一件事：损失函数画出来像一个碗，最低点只有一个。
+    这个「碗」的形状，是后面梯度下降能work的根本原因。如果损失函数坑坑洼洼有一万个局部最低点，
+    我们就很难找到全局最优了。
+  </p>
+
+  <div class="note note--math">
+    <div class="note__title"><span class="ico">∑</span>凸函数：这个碗有名字</div>
+    <p>
+      对于线性回归 + MSE，损失函数是<strong>凸函数</strong>（convex）——
+      形状像一个碗，任意两点连线都在函数图像上方，只有一个全局最低点。
+      凸函数的最优解甚至可以直接用公式算出来：
+    </p>
+    <p style="margin-top:.6rem">
+      $w^* = \dfrac{\sum_i (x_i - \bar{x})(y_i - \bar{y})}{\sum_i (x_i - \bar{x})^2}$，
+      $b^* = \bar{y} - w^*\bar{x}$
+    </p>
+    <p style="margin-top:.6rem">
+      上面演示里的「自动找到最优解」按钮用的就是这个公式。
+      但注意：<strong>只有最简单的模型才有这种闭式解</strong>。
+      神经网络没有，所以我们才必须用梯度下降一点点逼近——这是第 4 章的主题。
+    </p>
+  </div>
+
+  <h2>1.5 用 NumPy 写出第一个「学习」程序</h2>
+
+  <p>
+    不用任何框架，二十行 NumPy 就能完成一次完整的学习过程。这段代码值得逐行读：
+  </p>
+
+  <div class="codeblock" data-lang="python" data-title="linear_regression.py — 20 行完成一次学习">
+<script type="text/dlcode">
+import numpy as np
+
+# 1) 造一批"数据"：真实规律是 y = 2.5x + 1，但我们加了噪声
+rng = np.random.default_rng(0)
+x = rng.uniform(0, 10, size=200)
+y = 2.5 * x + 1.0 + rng.normal(0, 1.5, size=200)   # 真实世界不会这么干净
+
+# 2) 闭式解：直接从数据算出最优的 w 和 b
+x_mean, y_mean = x.mean(), y.mean()
+w = ((x - x_mean) * (y - y_mean)).sum() / ((x - x_mean) ** 2).sum()
+b = y_mean - w * x_mean
+
+# 3) 看它学得怎么样
+pred = w * x + b
+loss = np.mean((pred - y) ** 2)
+print(f"学到的规律: y = {w:.3f}x + {b:.3f}")   # 应该接近 2.5x + 1.0
+print(f"均方误差: {loss:.3f}")                  # 大致等于噪声方差 1.5² = 2.25
+</script>
+  </div>
+
+  <div class="codeblock codeblock--out" data-lang="text" data-title="运行结果">
+<script type="text/dlcode">
+学到的规律: y = 2.508x + 0.912
+均方误差: 2.187
+</script>
+  </div>
+
+  <p>
+    注意最后一行输出。<strong>模型的误差几乎正好等于我们注入的噪声方差</strong>（$1.5^2 = 2.25$）。
+    这不是巧合——这说明模型已经把数据里所有可学的规律都学到了，
+    剩下的误差是数据本身自带的随机性，任何模型都消除不了。
+  </p>
+
+  <div class="note note--tip">
+    <div class="note__title"><span class="ico">✓</span>一个能救命的心智模型</div>
+    <p>
+      训练误差永远不会降到 0，除非你在过拟合。<strong>看到一个极小的训练误差时，
+      第一反应应该是「我哪里搞错了」，而不是「我太厉害了」。</strong>
+      这个直觉会在第 6 章救命。
+    </p>
+  </div>
+
+  <h2>1.6 学习的四种姿势</h2>
+
+  <p>
+    上面的例子里，我们既有输入 $x$ 又有正确答案 $y$，这叫<strong>监督学习</strong>。
+    但「学习」不止这一种姿势。理解这四种范式的区别，能帮你判断一个新问题该用什么方法。
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>范式</th><th>有什么数据</th><th>学什么</th><th>典型任务</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>监督学习</strong><br><small>Supervised</small></td>
+          <td>输入 + 正确答案</td>
+          <td>从输入到答案的映射</td>
+          <td>图像分类、房价预测、机器翻译</td>
+        </tr>
+        <tr>
+          <td><strong>无监督学习</strong><br><small>Unsupervised</small></td>
+          <td>只有输入</td>
+          <td>数据内部的结构</td>
+          <td>聚类、降维、异常检测</td>
+        </tr>
+        <tr>
+          <td><strong>自监督学习</strong><br><small>Self-supervised</small></td>
+          <td>只有原始数据<br>（答案从数据本身造出来）</td>
+          <td>数据的压缩表示</td>
+          <td><strong>大模型预训练</strong>、对比学习</td>
+        </tr>
+        <tr>
+          <td><strong>强化学习</strong><br><small>Reinforcement</small></td>
+          <td>环境反馈的奖励信号</td>
+          <td>能拿到最多奖励的策略</td>
+          <td>下围棋、机器人控制、RLHF</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    其中<strong>自监督学习</strong>是理解大模型的钥匙，值得单独说一句。
+    它的巧妙之处在于：<em>不需要人工标注</em>。给模型一句话「今天天气真」，让它预测下一个字是「好」——
+    答案不用人来标，就在原文里。互联网上有几万亿字的文本，
+    每一段文字都自动变成了一道填空题。这就是 GPT 能吃掉整个互联网的原因。
+  </p>
+
+  <div class="keyidea">
+    <div class="keyidea__label">为什么自监督是核弹级创新</div>
+    <p>
+      监督学习的天花板是<strong>人工标注的速度</strong>——请人标 100 万张图要几个月。
+      自监督学习的天花板是<strong>互联网上已有的文字总量</strong>——那是几百 TB。
+      当「数据量」这个瓶颈被彻底打开后，剩下的问题就变成了：模型能不能变大到吃下这些数据？
+    </p>
+    <p>答案是能。于是有了 GPT-3、GPT-4，以及后来的所有大模型。</p>
+  </div>
+
+  <h2>1.7 为什么是现在？</h2>
+
+  <p>
+    神经网络不是新东西。1958 年就有感知机，1986 年就有了反向传播，
+    1998 年 LeCun 就用卷积网络识别支票上的数字了。那为什么直到 2012 年才爆发？
+  </p>
+
+  <p>
+    因为一个模型要真正有用，需要三样东西同时到位，而它们恰好都在 2010 年代成熟了：
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card__title">📦 数据</div>
+      <p class="card__body">
+        ImageNet（2009）带来了 1400 万张标注图片，互联网带来了近乎无限的自然语言文本。
+        没有数据，再好的算法也是空转。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">⚡ 算力</div>
+      <p class="card__body">
+        GPU 本来是为游戏显卡设计的，但它的几千个核心恰好适合矩阵乘法。
+        2012 年 AlexNet 用两块 GTX 580 把 ImageNet 错误率砍掉一半，从此 GPU 成了深度学习的标配。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">🧠 算法</div>
+      <p class="card__body">
+        ReLU 替换 Sigmoid 解决了梯度消失，Dropout 和 BatchNorm 让深层网络能训得动，
+        Adam 优化器让调参不再靠玄学。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card__title">🛠 工具</div>
+      <p class="card__body">
+        Theano → TensorFlow → PyTorch。自动微分让「求梯度」变成一行代码，
+        把研究者从手推公式里解放出来。
+      </p>
+    </div>
+  </div>
+
+  <p>
+    换个角度看：深度学习并不是「突然变聪明了」，而是<strong>一个一直被硬件和数据的短板卡住的正确想法，
+    终于等到了它的时代</strong>。这也解释了为什么它今天还会继续变强——
+    这三个要素都还在以每年翻倍的速度增长。
+  </p>
+
+  <h2>1.8 本章小结</h2>
+
+  <div class="gloss">
+    <div class="gloss__item">
+      <div class="gloss__term">模型 <small>model</small></div>
+      <div class="gloss__def">一个带参数的函数 $f(x;\theta)$。参数就是「旋钮」，决定了函数的形状。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">参数 <small>parameter</small></div>
+      <div class="gloss__def">模型里可以被调整的数字，记作 $\theta$。学习的过程就是调整它们的过程。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">损失 <small>loss</small></div>
+      <div class="gloss__def">衡量当前参数有多差的标量。越小越好。训练的目标就是让它变小。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">训练 <small>training</small></div>
+      <div class="gloss__def">用数据自动调整参数、使损失下降的过程。</div>
+    </div>
+    <div class="gloss__item">
+      <div class="gloss__term">泛化 <small>generalization</small></div>
+      <div class="gloss__def">在没见过的数据上表现好的能力。这才是我们真正关心的东西。</div>
+    </div>
+  </div>
+
+  <p>三句话总结这一章：</p>
+
+  <ol>
+    <li>深度学习的核心反转是「用数据找规则」，而不是「用规则处理数据」。</li>
+    <li>模型 = 带参数的函数；损失 = 衡量有多差的数字；训练 = 让损失变小。</li>
+    <li>自监督学习让「数据」不再是瓶颈，这是大模型时代的起点。</li>
+  </ol>
+
+  <div class="quiz">
+    <div class="quiz__head">自测 · 点开看答案</div>
+
+    <details>
+      <summary>为什么垃圾邮件过滤器用规则写会失败，而用数据学就能成功？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为「什么算垃圾邮件」是一个人类能模糊判断但难以言传的任务。
+          规则要求你显式说出判据，而真实的判据分散在几千个微弱信号里（发件时间、词频、
+          链接域名、你历史上是否回复过……），人类无法穷举。模型的价值恰恰在于
+          它能同时权衡上千个弱信号，并且这些权重是从真实数据里算出来的，而不是猜的。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>损失函数为什么常用平方误差，而不是直接求和或取绝对值？</summary>
+      <div class="quiz__answer">
+        <p>
+          直接求和会出现正负相消，一个样本 +5 一个 −5 加起来是 0，掩盖了真实的错误。
+          绝对值虽然解决了符号问题，但它在 0 点不可导（是个尖角），会让梯度下降不好用。
+          平方既保证非负、又对大错惩罚更重、还处处光滑可导，是最省心的选择。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>训练误差降到 0.0001，说明模型很好吗？</summary>
+      <div class="quiz__answer">
+        <p>
+          <strong>不一定，而且通常说明有问题。</strong>真实数据里必然包含噪声（比如测量误差、
+          标注错误、随机性），这些噪声是不可预测的。如果训练误差低于噪声水平，
+          说明模型把噪声也背下来了——它在训练集上表现完美，换一批新数据就会崩。
+          这叫过拟合，是第 6 章的重点。
+        </p>
+      </div>
+    </details>
+
+    <details>
+      <summary>为什么说自监督学习是「核弹级」的？</summary>
+      <div class="quiz__answer">
+        <p>
+          因为它把「获取训练数据」的成本从「请人标注」降到了「几乎为零」。
+          一句「今天天气真___」，答案就在原文里，不需要任何人工。
+          这意味着整个互联网的文本都能变成训练数据，规模从百万级跃升到万亿级。
+          规模一起来，模型变大、效果变好、还能继续吃更多数据——这就是大模型的飞轮。
+        </p>
+      </div>
+    </details>
+  </div>
+
+  <h2>下一章预告</h2>
+
+  <p>
+    我们知道了「学习 = 调参数让损失变小」。但线性模型的能力太弱了——
+    它只会画直线，连「异或」这种最基础的逻辑都学不会。
+    下一章我们造出<strong>神经元</strong>，并且看到两个关键零件：
+    加权求和，和一个叫<strong>激活函数</strong>的东西。后者是深度学习能处理一切复杂问题的秘密。
+  </p>
+
+</article>
+</main>
+</div>
+
+<script src="../assets/app.js"></script>
+<script src="../assets/widgets.js"></script>
+</body>
+</html>
